@@ -1,6 +1,6 @@
 {
   "name": "@voightxyz/sdk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Real-time observability for AI agents on Solana. A 3-line SDK, a live timeline, and an on-chain audit trail.",
   "keywords": [
     "solana",
@@ -15,10 +15,10 @@
   "homepage": "https://voight.xyz",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Seenfinity/voight-sdk.git"
+    "url": "git+https://github.com/voightxyz/voight-sdk.git"
   },
   "bugs": {
-    "url": "https://github.com/Seenfinity/voight-sdk/issues"
+    "url": "https://github.com/voightxyz/voight-sdk/issues"
   },
   "license": "MIT",
   "author": "Voight (https://voight.xyz)",

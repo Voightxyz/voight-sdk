@@ -7,7 +7,7 @@
  *   - voight.enforce()  — (v0.2) route decisions through a human-in-the-loop.
  *
  * Docs:    https://voight.xyz
- * Issues:  https://github.com/Seenfinity/voight-sdk/issues
+ * Issues:  https://github.com/voightxyz/voight-sdk/issues
  */
 
 export type VoightOptions = {
@@ -190,7 +190,7 @@ export class Voight {
   private headers(): Record<string, string> {
     const headers: Record<string, string> = {
       'content-type': 'application/json',
-      'x-voight-sdk': `@voightxyz/sdk@0.1.0`,
+      'x-voight-sdk': `@voightxyz/sdk@0.1.1`,
     }
     if (this.apiKey) headers['authorization'] = `Bearer ${this.apiKey}`
     return headers
