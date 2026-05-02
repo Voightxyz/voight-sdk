@@ -1,22 +1,38 @@
 # @voightxyz/sdk
 
 **Real-time observability for AI agents on Solana.**
-Live timeline, on-chain audit trail, and custom alerts for any AI agent — from ElizaOS to Solana Agent Kit to custom stacks.
+Live timeline, on-chain audit trail, and alerts — for any AI agent, including the one inside your editor.
 
-> Part of [Voight](https://voight.xyz). This package is the TypeScript client.
-> Prefer a framework Skill or a raw HTTP call? Both work against the same API — pick whichever fits your stack.
+> Part of [Voight](https://voight.xyz).
 
 ---
 
-## Install
+## Wire it into Claude Code in one command
+
+```bash
+npx -y @voightxyz/sdk setup
+```
+
+Generate your key at [voight.xyz/dashboard](https://voight.xyz/dashboard), paste it when prompted, and every prompt + tool call + bash + file edit Claude Code does starts streaming to your dashboard. No code changes.
+
+Cursor and Codex use the same flow:
+
+```bash
+npx -y @voightxyz/sdk setup --target=cursor
+npx -y @voightxyz/sdk setup --target=codex
+```
+
+---
+
+## Or import the library directly
+
+For agents you build yourself:
 
 ```bash
 npm install @voightxyz/sdk
 ```
 
 Node 18+ (uses global `fetch`). Browsers, Workers, and Bun are supported.
-
-## Usage
 
 Three lines, any framework:
 
