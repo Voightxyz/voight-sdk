@@ -75,6 +75,18 @@ export type LogInput = {
   /** Outcome of the action. Defaults to `'success'`. */
   outcome?: EventOutcome
 
+  /** Wall-clock duration of the action in milliseconds (e.g. tool exec time). */
+  durationMs?: number
+
+  /** Human-readable error message when `outcome === 'failed'`. */
+  errorMessage?: string
+
+  /** LLM model that produced the action (e.g. `claude-sonnet-4-5`). */
+  model?: string
+
+  /** Token usage for the action, if known. */
+  tokens?: { input?: number; output?: number; total?: number }
+
   /** Anything else worth recording. Merged on top of `defaults`. */
   metadata?: Record<string, unknown>
 
@@ -139,6 +151,10 @@ export class Voight {
       transaction: input.transaction ?? null,
       amount: input.amount ?? null,
       outcome: input.outcome ?? 'success',
+      durationMs: input.durationMs,
+      errorMessage: input.errorMessage,
+      model: input.model,
+      tokens: input.tokens,
       metadata: { ...this.defaults, ...input.metadata },
     }
 
@@ -190,7 +206,7 @@ export class Voight {
   private headers(): Record<string, string> {
     const headers: Record<string, string> = {
       'content-type': 'application/json',
-      'x-voight-sdk': `@voightxyz/sdk@0.1.1`,
+      'x-voight-sdk': `@voightxyz/sdk@0.2.2`,
     }
     if (this.apiKey) headers['authorization'] = `Bearer ${this.apiKey}`
     return headers

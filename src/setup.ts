@@ -27,6 +27,9 @@ const SUPPORTED_HOOKS = [
   'PostToolUse',
   'UserPromptSubmit',
   'Stop',
+  'SubagentStop',
+  'Notification',
+  'PreCompact',
 ] as const
 type HookName = (typeof SUPPORTED_HOOKS)[number]
 
