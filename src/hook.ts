@@ -34,6 +34,7 @@
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -91,7 +92,7 @@ function debugLog(label: string, payload: unknown): void {
         label,
         payload,
       }) + '\n'
-    require('node:fs').appendFileSync(path, entry)
+    appendFileSync(path, entry)
   } catch {
     // never throw from a hook
   }

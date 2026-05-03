@@ -36,13 +36,16 @@
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
-  unlinkSync,
-  writeFileSync,
+  readSync,
   readdirSync,
   statSync,
+  unlinkSync,
+  writeFileSync,
 } from 'node:fs'
 
 const ATTRIBUTION_DIR = join(tmpdir(), 'voight-tokens')
@@ -137,12 +140,17 @@ export function findUsageForTool(
     const stats = statSync(transcriptPath)
     const maxBytes = 4 * 1024 * 1024
     if (stats.size > maxBytes) {
+      // CRITICAL: must use top-level ESM imports here. Earlier
+      // versions called `require('node:fs').openSync` which becomes
+      // `__require("fs").openSync` after esbuild and silently fails
+      // in pure-ESM runtimes — leaving long-running sessions (>4MB
+      // transcripts) without any token capture.
       const buf = Buffer.alloc(maxBytes)
-      const fd = require('node:fs').openSync(transcriptPath, 'r')
+      const fd = openSync(transcriptPath, 'r')
       try {
-        require('node:fs').readSync(fd, buf, 0, maxBytes, stats.size - maxBytes)
+        readSync(fd, buf, 0, maxBytes, stats.size - maxBytes)
       } finally {
-        require('node:fs').closeSync(fd)
+        closeSync(fd)
       }
       raw = buf.toString('utf-8')
       const idx = raw.indexOf('\n')
