@@ -77,27 +77,64 @@ type TranscriptMessage = {
   }
 }
 
+type FindUsageDiag = {
+  transcriptExists: boolean
+  totalLines: number
+  assistantMessages: number
+  toolNameMatches: number
+  exactInputMatches: number
+  matched: 'exact' | 'lenient' | 'none'
+  fallbackReason?: string
+}
+
 /**
  * Tail-read the transcript and find the most recent assistant message
- * whose tool_use entries include the given (toolName, toolInput).
- * Returns the message + extracted usage, or null if no match.
+ * whose tool_use matches the given (toolName, toolInput).
  *
- * Reads the file once and walks backward — for typical sessions the
- * matching message is in the last few lines, so we don't pay for the
- * whole file scan. Capped at the last 4MB for safety.
+ * Two-stage match (with the second as a robustness fallback):
+ *   1. Exact: tool_name === toolName AND stable-stringified inputs match.
+ *      This handles the common case cleanly.
+ *   2. Lenient: tool_name === toolName, take the most recent. Real-world
+ *      Claude Code occasionally surfaces tool_input shape differences
+ *      between the hook stdin and the transcript-recorded tool_use
+ *      (extra/missing fields, default normalization). Since the
+ *      transcript is append-only and we walk backward, the most recent
+ *      tool of this name IS the one that triggered the current hook.
+ *      Dedup via message UUID still ensures usage is attributed once.
+ *
+ * Capped at the last 4MB of the file for very large transcripts.
  */
 export function findUsageForTool(
   transcriptPath: string | undefined,
   toolName: string | undefined,
   toolInput: Record<string, unknown> | undefined,
-): { uuid: string; usage: TranscriptUsage } | null {
-  if (!transcriptPath || !toolName) return null
-  if (!existsSync(transcriptPath)) return null
+): {
+  uuid: string
+  usage: TranscriptUsage
+  diag: FindUsageDiag
+} | null {
+  const diag: FindUsageDiag = {
+    transcriptExists: false,
+    totalLines: 0,
+    assistantMessages: 0,
+    toolNameMatches: 0,
+    exactInputMatches: 0,
+    matched: 'none',
+  }
+
+  if (!transcriptPath || !toolName) {
+    diag.fallbackReason = 'no transcriptPath or toolName'
+    return diag.transcriptExists ? null : null
+  }
+  if (!existsSync(transcriptPath)) {
+    diag.fallbackReason = `transcript not found: ${transcriptPath}`
+    return null
+  }
+  diag.transcriptExists = true
 
   let raw: string
   try {
     const stats = statSync(transcriptPath)
-    // For very large transcripts, read only the last 4MB.
     const maxBytes = 4 * 1024 * 1024
     if (stats.size > maxBytes) {
       const buf = Buffer.alloc(maxBytes)
@@ -108,50 +145,76 @@ export function findUsageForTool(
         require('node:fs').closeSync(fd)
       }
       raw = buf.toString('utf-8')
-      // Drop the (probably partial) first line so we don't try to
-      // parse half a JSON object.
       const idx = raw.indexOf('\n')
       if (idx > 0) raw = raw.slice(idx + 1)
     } else {
       raw = readFileSync(transcriptPath, 'utf-8')
     }
-  } catch {
+  } catch (err) {
+    diag.fallbackReason = `read failed: ${(err as Error).message}`
     return null
   }
 
   const lines = raw.split('\n').filter((l) => l.trim().length > 0)
+  diag.totalLines = lines.length
 
-  // Walk backward to find the most recent assistant message that
-  // calls our specific tool with our specific input.
+  // Stage 1: exact match (tool_name + tool_input).
+  // Stage 2: lenient match (tool_name only). Recorded as a fallback if
+  //          stage 1 finds nothing.
+  let lenientCandidate: {
+    uuid: string
+    usage: TranscriptUsage
+  } | null = null
+
   for (let i = lines.length - 1; i >= 0; i--) {
     const parsed = safeParseJson(lines[i]!)
     if (!parsed) continue
     if (parsed.type !== 'assistant') continue
     const msg = parsed.message
     if (!msg || msg.role !== 'assistant') continue
+    diag.assistantMessages++
+
     const content = Array.isArray(msg.content) ? msg.content : []
-    const matchingTool = content.find(
-      (c) =>
-        c &&
-        c.type === 'tool_use' &&
-        c.name === toolName &&
-        toolInputsMatch(c.input, toolInput),
+    const toolUses = content.filter(
+      (c) => c && c.type === 'tool_use' && c.name === toolName,
     )
-    if (!matchingTool) continue
+    if (toolUses.length === 0) continue
+    diag.toolNameMatches++
 
     const usage = msg.usage
-    if (!usage) return null
-    return {
-      uuid: parsed.uuid ?? `${transcriptPath}:${i}`,
-      usage: {
-        inputTokens: usage.input_tokens ?? 0,
-        outputTokens: usage.output_tokens ?? 0,
-        cacheCreationTokens: usage.cache_creation_input_tokens,
-        cacheReadTokens: usage.cache_read_input_tokens,
-        model: typeof msg.model === 'string' ? msg.model : null,
-      },
+    if (!usage) continue
+    const extracted: TranscriptUsage = {
+      inputTokens: usage.input_tokens ?? 0,
+      outputTokens: usage.output_tokens ?? 0,
+      cacheCreationTokens: usage.cache_creation_input_tokens,
+      cacheReadTokens: usage.cache_read_input_tokens,
+      model: typeof msg.model === 'string' ? msg.model : null,
+    }
+    const uuid = parsed.uuid ?? `${transcriptPath}:${i}`
+
+    // Stage 1: exact input match
+    const exact = toolUses.find((c) => toolInputsMatch(c.input, toolInput))
+    if (exact) {
+      diag.exactInputMatches++
+      diag.matched = 'exact'
+      return { uuid, usage: extracted, diag }
+    }
+
+    // Remember the first (most recent) lenient candidate; we'll use it
+    // only if no exact match shows up further back in the transcript.
+    if (!lenientCandidate) {
+      lenientCandidate = { uuid, usage: extracted }
     }
   }
+
+  if (lenientCandidate) {
+    diag.matched = 'lenient'
+    diag.fallbackReason = 'no exact tool_input match — used most recent ' +
+      `assistant message with tool_name=${toolName}`
+    return { ...lenientCandidate, diag }
+  }
+
+  diag.fallbackReason = `no assistant message in transcript invokes ${toolName}`
   return null
 }
 

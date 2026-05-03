@@ -73,6 +73,30 @@ function dbg(...args: unknown[]) {
   if (DEBUG) console.error('[voight-hook]', ...args)
 }
 
+/**
+ * Diagnostic log to a file. Only active when VOIGHT_DEBUG_FILE is set
+ * (e.g. VOIGHT_DEBUG_FILE=/tmp/voight-hook.log). Lets us see what's
+ * happening inside the hook subprocess from the user's terminal
+ * without polluting Claude Code's stderr.
+ *
+ * Each call appends one JSON line with a timestamp + label + payload.
+ */
+function debugLog(label: string, payload: unknown): void {
+  const path = process.env.VOIGHT_DEBUG_FILE
+  if (!path) return
+  try {
+    const entry =
+      JSON.stringify({
+        ts: new Date().toISOString(),
+        label,
+        payload,
+      }) + '\n'
+    require('node:fs').appendFileSync(path, entry)
+  } catch {
+    // never throw from a hook
+  }
+}
+
 async function readStdin(): Promise<string> {
   if (process.stdin.isTTY) return ''
   const chunks: Buffer[] = []
@@ -554,27 +578,47 @@ function mapEvent(evt: HookEvent): LogInput & { reasoning: string } {
         | { input?: number; output?: number; total?: number }
         | undefined
       let transcriptModel: string | undefined
+      let transcriptMatchKind: 'exact' | 'lenient' | 'none' = 'none'
       if (process.env.VOIGHT_NO_TRANSCRIPT !== '1') {
         const found = findUsageForTool(
           evt.transcript_path,
           evt.tool_name,
           evt.tool_input,
         )
-        if (found && claimAttribution(found.uuid)) {
-          // First tool of this assistant message — attribute the cost.
-          // Subsequent tools of the same message will see the marker
-          // and skip, avoiding double-counting.
-          const u = found.usage
-          const totalInput =
-            u.inputTokens +
-            (u.cacheCreationTokens ?? 0) +
-            (u.cacheReadTokens ?? 0)
-          transcriptTokens = {
-            input: totalInput,
-            output: u.outputTokens,
-            total: totalInput + u.outputTokens,
+        debugLog('transcript lookup', {
+          tool: evt.tool_name,
+          transcript_path: evt.transcript_path,
+          diag: found?.diag,
+          foundUsage: found
+            ? {
+                input: found.usage.inputTokens,
+                output: found.usage.outputTokens,
+                model: found.usage.model,
+              }
+            : null,
+        })
+        if (found) {
+          transcriptMatchKind = found.diag.matched
+          if (claimAttribution(found.uuid)) {
+            const u = found.usage
+            const totalInput =
+              u.inputTokens +
+              (u.cacheCreationTokens ?? 0) +
+              (u.cacheReadTokens ?? 0)
+            transcriptTokens = {
+              input: totalInput,
+              output: u.outputTokens,
+              total: totalInput + u.outputTokens,
+            }
+            if (u.model) transcriptModel = u.model
+            debugLog('attributed', {
+              uuid: found.uuid,
+              tokens: transcriptTokens,
+              model: transcriptModel,
+            })
+          } else {
+            debugLog('skipped (already attributed)', { uuid: found.uuid })
           }
-          if (u.model) transcriptModel = u.model
         }
       }
 
