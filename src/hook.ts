@@ -578,6 +578,19 @@ function mapEvent(evt: HookEvent): LogInput & { reasoning: string } {
       let transcriptTokens:
         | { input?: number; output?: number; total?: number }
         | undefined
+      // Explicit breakdown for accurate backend pricing — Anthropic
+      // bills cache_read at 0.10× and cache_creation at 1.25×, but the
+      // flat tokens.input number conflates all three at the full rate.
+      // When the SDK ships this, the backend's cost path bypasses the
+      // 80%-cache heuristic and prices each flavour at its true rate.
+      let tokensBreakdown:
+        | {
+            inputBase: number
+            cacheCreation: number
+            cacheRead: number
+            output: number
+          }
+        | undefined
       let transcriptModel: string | undefined
       let transcriptMatchKind: 'exact' | 'lenient' | 'none' = 'none'
       if (process.env.VOIGHT_NO_TRANSCRIPT !== '1') {
@@ -611,10 +624,17 @@ function mapEvent(evt: HookEvent): LogInput & { reasoning: string } {
               output: u.outputTokens,
               total: totalInput + u.outputTokens,
             }
+            tokensBreakdown = {
+              inputBase: u.inputTokens,
+              cacheCreation: u.cacheCreationTokens ?? 0,
+              cacheRead: u.cacheReadTokens ?? 0,
+              output: u.outputTokens,
+            }
             if (u.model) transcriptModel = u.model
             debugLog('attributed', {
               uuid: found.uuid,
               tokens: transcriptTokens,
+              breakdown: tokensBreakdown,
               model: transcriptModel,
             })
           } else {
@@ -642,6 +662,7 @@ function mapEvent(evt: HookEvent): LogInput & { reasoning: string } {
           detail: detail.structured,
           response_preview: responsePreview(tr),
           ...(tokens ? { tokens } : {}),
+          ...(tokensBreakdown ? { tokensBreakdown } : {}),
           ...(transcriptModel ? { model: transcriptModel } : {}),
         },
       }
