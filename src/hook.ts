@@ -46,6 +46,11 @@ import { createHash } from 'node:crypto'
 
 import { Voight } from './index.js'
 import type { LogInput } from './index.js'
+import {
+  claimAttribution,
+  findUsageForTool,
+  gcAttributionDir,
+} from './transcript.js'
 
 type HookEvent = {
   hook_event_name?: string
@@ -84,6 +89,50 @@ function safeParse(raw: string): HookEvent | null {
   } catch {
     return null
   }
+}
+
+// --- Trace ID per session -----------------------------------------------
+// Each user prompt starts a new "trace" — all subsequent events until
+// the next prompt share that traceId so the dashboard can group "the
+// agent's full response to my question" as one logical operation.
+//
+// Persisted in tmpdir keyed by session_id so the value survives across
+// the short-lived hook subprocesses Claude Code spawns.
+
+const TRACE_DIR = join(tmpdir(), 'voight-traces')
+
+function traceFile(sessionId: string | undefined): string {
+  return join(TRACE_DIR, `${(sessionId ?? 'unknown').slice(0, 64)}.txt`)
+}
+
+function setTraceId(sessionId: string | undefined, traceId: string): void {
+  try {
+    mkdirSync(TRACE_DIR, { recursive: true })
+    writeFileSync(traceFile(sessionId), traceId)
+  } catch (err) {
+    dbg('trace write failed:', (err as Error).message)
+  }
+}
+
+function getTraceId(sessionId: string | undefined): string | undefined {
+  try {
+    const path = traceFile(sessionId)
+    if (!existsSync(path)) return undefined
+    return readFileSync(path, 'utf-8').trim() || undefined
+  } catch {
+    return undefined
+  }
+}
+
+function newTraceId(): string {
+  // 12 hex chars from timestamp + random — short, copy-paste friendly,
+  // and enough entropy to be unique across one user's sessions.
+  const ts = Date.now().toString(36)
+  const rand = createHash('sha256')
+    .update(`${Date.now()}|${Math.random()}`)
+    .digest('hex')
+    .slice(0, 8)
+  return `t_${ts}_${rand}`
 }
 
 // --- Pre→Post duration cache --------------------------------------------
@@ -444,11 +493,24 @@ function responsePreview(
 
 function mapEvent(evt: HookEvent): LogInput & { reasoning: string } {
   const event = evt.hook_event_name ?? 'unknown'
+
+  // Trace ID lifecycle: UserPromptSubmit starts a new trace; everything
+  // until the next prompt inherits it. Stop / SubagentStop also rotate
+  // since the agent is "done" with whatever it was doing.
+  let traceId: string | undefined
+  if (event === 'UserPromptSubmit') {
+    traceId = newTraceId()
+    setTraceId(evt.session_id, traceId)
+  } else {
+    traceId = getTraceId(evt.session_id)
+  }
+
   const baseMeta: Record<string, unknown> = {
     source: 'claude-code',
     hookEvent: event,
     sessionId: evt.session_id,
     cwd: evt.cwd,
+    ...(traceId ? { traceId } : {}),
   }
 
   switch (event) {
@@ -472,7 +534,7 @@ function mapEvent(evt: HookEvent): LogInput & { reasoning: string } {
       const detail = extractToolDetail(evt.tool_name, evt.tool_input)
       const tr = evt.tool_response
       const { failed, errorMessage } = detectFailure(tr)
-      const tokens = extractTokens(tr)
+      const responseTokens = extractTokens(tr)
 
       const key = durationKey(evt.session_id, evt.tool_name, evt.tool_input)
       const startedAt = consumeStart(key)
@@ -483,6 +545,43 @@ function mapEvent(evt: HookEvent): LogInput & { reasoning: string } {
         durationMs !== undefined ? ` (${formatDuration(durationMs)})` : ''
       const prefix = failed ? '✗' : '✓'
 
+      // Look up the assistant message that initiated this tool call
+      // in the local transcript. That message's `usage` is the real
+      // source of token counts for Claude Code sessions — most tools
+      // (Bash, Read, Edit) don't return usage themselves. Disabled
+      // when VOIGHT_NO_TRANSCRIPT=1.
+      let transcriptTokens:
+        | { input?: number; output?: number; total?: number }
+        | undefined
+      let transcriptModel: string | undefined
+      if (process.env.VOIGHT_NO_TRANSCRIPT !== '1') {
+        const found = findUsageForTool(
+          evt.transcript_path,
+          evt.tool_name,
+          evt.tool_input,
+        )
+        if (found && claimAttribution(found.uuid)) {
+          // First tool of this assistant message — attribute the cost.
+          // Subsequent tools of the same message will see the marker
+          // and skip, avoiding double-counting.
+          const u = found.usage
+          const totalInput =
+            u.inputTokens +
+            (u.cacheCreationTokens ?? 0) +
+            (u.cacheReadTokens ?? 0)
+          transcriptTokens = {
+            input: totalInput,
+            output: u.outputTokens,
+            total: totalInput + u.outputTokens,
+          }
+          if (u.model) transcriptModel = u.model
+        }
+      }
+
+      // Prefer transcript tokens (real LLM usage) over tool_response
+      // tokens (subagent only). Both shouldn't normally co-exist.
+      const tokens = transcriptTokens ?? responseTokens
+
       return {
         type: failed ? 'error' : 'action',
         toolExecuted: evt.tool_name,
@@ -491,14 +590,14 @@ function mapEvent(evt: HookEvent): LogInput & { reasoning: string } {
         durationMs,
         errorMessage,
         tokens,
+        model: transcriptModel,
         metadata: {
           ...baseMeta,
           phase: 'post',
           detail: detail.structured,
           response_preview: responsePreview(tr),
-          // Mirror tokens into metadata so they survive even if the
-          // /v1/events schema doesn't surface a top-level `tokens` field.
           ...(tokens ? { tokens } : {}),
+          ...(transcriptModel ? { model: transcriptModel } : {}),
         },
       }
     }
@@ -585,6 +684,7 @@ function formatDuration(ms: number): string {
 
 export async function runHook(): Promise<void> {
   gcCacheOnce()
+  gcAttributionDir()
 
   const apiKey = process.env.VOIGHT_KEY
   if (!apiKey) {
@@ -627,7 +727,16 @@ export async function runHook(): Promise<void> {
   })
 
   const mapped = mapEvent(evt)
-  const res = await voight.log(mapped)
+  // Lift traceId from metadata to the top-level LogInput field so the
+  // Voight client can ship it as a first-class column when the
+  // backend gains a dedicated `traceId` field. Today it's also in
+  // metadata.traceId so the dashboard already groups by it.
+  const traceId =
+    typeof (mapped.metadata as Record<string, unknown> | undefined)?.traceId ===
+    'string'
+      ? ((mapped.metadata as Record<string, unknown>).traceId as string)
+      : undefined
+  const res = await voight.log({ ...mapped, traceId })
   if (!res.ok) dbg('log failed:', res.error)
   else dbg('logged event', res.eventId)
 }

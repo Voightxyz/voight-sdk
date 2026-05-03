@@ -45,6 +45,13 @@ export type VoightOptions = {
    * Custom fetch implementation (Node <18, test doubles, etc).
    */
   fetch?: typeof globalThis.fetch
+
+  /**
+   * Number of automatic retries on transient failures (network errors,
+   * 5xx responses, 429 with Retry-After). Defaults to 3 — set to 0
+   * to disable.
+   */
+  retries?: number
 }
 
 export type EventType = 'decision' | 'action' | 'error'
@@ -87,6 +94,14 @@ export type LogInput = {
   /** Token usage for the action, if known. */
   tokens?: { input?: number; output?: number; total?: number }
 
+  /**
+   * Optional trace identifier — events sharing the same traceId are
+   * one logical operation in the dashboard. The Claude Code hook
+   * auto-injects a trace per UserPromptSubmit so you don't have to
+   * pass this manually.
+   */
+  traceId?: string
+
   /** Anything else worth recording. Merged on top of `defaults`. */
   metadata?: Record<string, unknown>
 
@@ -94,11 +109,22 @@ export type LogInput = {
   timestamp?: number
 }
 
-export type LogResponse = {
-  ok: boolean
-  eventId?: string
-  error?: string
-}
+/**
+ * Discriminated union of failure modes from `voight.log()`. Callers
+ * wrapping the SDK can branch on `error.code` for retry / alerting
+ * logic without parsing message strings.
+ */
+export type LogError =
+  | { code: 'invalid_payload'; message: string }
+  | { code: 'unauthorized'; message: string }
+  | { code: 'rate_limited'; message: string; retryAfterMs: number }
+  | { code: 'network'; message: string; cause: Error }
+  | { code: 'server'; message: string; status: number; body: string }
+  | { code: 'unknown'; message: string }
+
+export type LogResponse =
+  | { ok: true; eventId?: string }
+  | { ok: false; error: LogError }
 
 const DEFAULT_ENDPOINT = 'https://voight-production.up.railway.app'
 
@@ -113,6 +139,7 @@ export class Voight {
   private readonly defaults: Record<string, unknown>
   private readonly swallowErrors: boolean
   private readonly fetchImpl: typeof globalThis.fetch
+  private readonly retries: number
 
   constructor(options: VoightOptions) {
     if (!options || typeof options.agentId !== 'string' || !options.agentId) {
@@ -124,6 +151,7 @@ export class Voight {
     this.endpoint = (options.endpoint ?? DEFAULT_ENDPOINT).replace(/\/+$/, '')
     this.defaults = options.defaults ?? {}
     this.swallowErrors = options.swallowErrors ?? true
+    this.retries = Math.max(0, options.retries ?? 3)
 
     const fetchFn = options.fetch ?? globalThis.fetch
     if (typeof fetchFn !== 'function') {
@@ -140,6 +168,16 @@ export class Voight {
    * (the default).
    */
   async log(input: LogInput = {}): Promise<LogResponse> {
+    // Carry traceId both at top level (so the API can persist it as a
+    // column when that schema lands) and in metadata.traceId so the
+    // current backend already groups by it.
+    const traceId = input.traceId
+    const metadata = {
+      ...this.defaults,
+      ...input.metadata,
+      ...(traceId ? { traceId } : {}),
+    }
+
     const body = {
       agentId: this.agentId,
       type: input.type ?? 'decision',
@@ -155,31 +193,103 @@ export class Voight {
       errorMessage: input.errorMessage,
       model: input.model,
       tokens: input.tokens,
-      metadata: { ...this.defaults, ...input.metadata },
+      traceId,
+      metadata,
     }
 
+    let lastError: LogError | null = null
+    for (let attempt = 0; attempt <= this.retries; attempt++) {
+      const result = await this.attemptLog(body)
+      if (result.ok) return result
+      lastError = result.error
+
+      // Don't retry permanent failures.
+      if (
+        result.error.code === 'invalid_payload' ||
+        result.error.code === 'unauthorized'
+      ) {
+        break
+      }
+
+      // Don't retry past the final attempt.
+      if (attempt >= this.retries) break
+
+      // Compute backoff. Honor server-provided Retry-After when given,
+      // otherwise exponential with jitter: 100ms, 400ms, 1600ms…
+      const baseMs =
+        result.error.code === 'rate_limited' && result.error.retryAfterMs > 0
+          ? result.error.retryAfterMs
+          : 100 * Math.pow(4, attempt)
+      const jitterMs = Math.floor(Math.random() * 80)
+      await sleep(baseMs + jitterMs)
+    }
+
+    if (!this.swallowErrors) {
+      throw new Error(lastError?.message ?? 'voight.log failed')
+    }
+    return { ok: false, error: lastError ?? unknownError('exhausted retries') }
+  }
+
+  /** Single network attempt — classified into typed LogError codes. */
+  private async attemptLog(body: unknown): Promise<LogResponse> {
+    let res: Response
     try {
-      const res = await this.fetchImpl(`${this.endpoint}/v1/events`, {
+      res = await this.fetchImpl(`${this.endpoint}/v1/events`, {
         method: 'POST',
         headers: this.headers(),
         body: JSON.stringify(body),
       })
-
-      if (!res.ok) {
-        const text = await res.text().catch(() => '')
-        const error = `Voight API responded ${res.status}: ${text.slice(0, 200)}`
-        if (!this.swallowErrors) throw new Error(error)
-        return { ok: false, error }
+    } catch (err) {
+      const e = err as Error
+      return {
+        ok: false,
+        error: {
+          code: 'network',
+          message: e.message,
+          cause: e,
+        },
       }
+    }
 
+    if (res.ok) {
       const data = (await res.json().catch(() => ({}))) as {
         eventId?: string
       }
       return { ok: true, eventId: data.eventId }
-    } catch (err) {
-      if (!this.swallowErrors) throw err
-      return { ok: false, error: (err as Error).message }
     }
+
+    const text = await res.text().catch(() => '')
+    const message = `Voight API responded ${res.status}: ${text.slice(0, 200)}`
+
+    if (res.status === 400 || res.status === 422) {
+      return { ok: false, error: { code: 'invalid_payload', message } }
+    }
+    if (res.status === 401 || res.status === 403) {
+      return { ok: false, error: { code: 'unauthorized', message } }
+    }
+    if (res.status === 429) {
+      const retryAfter = Number(res.headers.get('retry-after') ?? '0') || 0
+      return {
+        ok: false,
+        error: {
+          code: 'rate_limited',
+          message,
+          retryAfterMs: retryAfter * 1000,
+        },
+      }
+    }
+    if (res.status >= 500) {
+      return {
+        ok: false,
+        error: {
+          code: 'server',
+          status: res.status,
+          message,
+          body: text.slice(0, 500),
+        },
+      }
+    }
+    return { ok: false, error: unknownError(message) }
   }
 
   /**
@@ -206,11 +316,19 @@ export class Voight {
   private headers(): Record<string, string> {
     const headers: Record<string, string> = {
       'content-type': 'application/json',
-      'x-voight-sdk': `@voightxyz/sdk@0.2.2`,
+      'x-voight-sdk': `@voightxyz/sdk@0.3.0`,
     }
     if (this.apiKey) headers['authorization'] = `Bearer ${this.apiKey}`
     return headers
   }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function unknownError(message: string): LogError {
+  return { code: 'unknown', message }
 }
 
 export default Voight
