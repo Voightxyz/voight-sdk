@@ -49,6 +49,7 @@ import { Voight } from './index.js'
 import type { LogInput } from './index.js'
 import {
   claimAttribution,
+  findResponseForSession,
   findUsageForTool,
   gcAttributionDir,
 } from './transcript.js'
@@ -682,6 +683,26 @@ function mapEvent(evt: HookEvent): LogInput & { reasoning: string } {
       }
     }
     case 'Stop': {
+      // Capture the agent's final text + stop reason + thinking from
+      // the local transcript. The Stop hook fires when the assistant
+      // turn ends — the last assistant message in the transcript at
+      // this point IS that turn. Privacy: same gating as token capture
+      // (VOIGHT_NO_TRANSCRIPT=1 turns it all off; per-flavour flags
+      // skip individual pieces).
+      let response:
+        | {
+            responseText?: string
+            stopReason?: string
+            thinkingPreview?: string
+          }
+        | null = null
+      if (process.env.VOIGHT_NO_TRANSCRIPT !== '1') {
+        response = findResponseForSession(evt.transcript_path, {
+          captureText: process.env.VOIGHT_NO_TRANSCRIPT_TEXT !== '1',
+          captureThinking: process.env.VOIGHT_NO_THINKING !== '1',
+        })
+      }
+
       return {
         type: 'decision',
         reasoning: 'session stopped',
@@ -689,6 +710,13 @@ function mapEvent(evt: HookEvent): LogInput & { reasoning: string } {
         metadata: {
           ...baseMeta,
           reason: evt.reason ?? null,
+          ...(response?.responseText
+            ? { responseText: response.responseText }
+            : {}),
+          ...(response?.stopReason ? { stopReason: response.stopReason } : {}),
+          ...(response?.thinkingPreview
+            ? { thinkingPreview: response.thinkingPreview }
+            : {}),
         },
       }
     }

@@ -311,3 +311,120 @@ export function gcAttributionDir(): void {
 function safeFilename(s: string): string {
   return s.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64)
 }
+
+// ─── Final response capture (Stop event) ─────────────────────────
+
+export type FinalResponse = {
+  /** Plain-text portion of the assistant's last message. Truncated. */
+  responseText?: string
+  /** Why the turn ended: 'end_turn' | 'max_tokens' | 'tool_use' | ... */
+  stopReason?: string
+  /** Last thinking block content (if extended thinking was on). Truncated. */
+  thinkingPreview?: string
+}
+
+export type FindResponseOptions = {
+  /** Default 2000. Set to 0 to skip text capture. */
+  maxTextLength?: number
+  /** Default 800. Set to 0 to skip thinking capture. */
+  maxThinkingLength?: number
+  /** Default true. Pass false to skip text entirely. */
+  captureText?: boolean
+  /** Default true. Pass false to skip thinking entirely. */
+  captureThinking?: boolean
+}
+
+/**
+ * Walk the transcript backward to find the assistant's last turn and
+ * extract its final text, stop_reason, and any thinking block.
+ *
+ * Returns null when the transcript file doesn't exist or is unreadable.
+ * Returns an empty object {} when the file exists but has no assistant
+ * messages (caller should treat that as "trace had no agent reply").
+ */
+export function findResponseForSession(
+  transcriptPath: string | undefined,
+  options: FindResponseOptions = {},
+): FinalResponse | null {
+  if (!transcriptPath) return null
+  if (!existsSync(transcriptPath)) return null
+
+  const maxTextLength = options.maxTextLength ?? 2000
+  const maxThinkingLength = options.maxThinkingLength ?? 800
+  const captureText = options.captureText ?? true
+  const captureThinking = options.captureThinking ?? true
+
+  let raw: string
+  try {
+    raw = readFileSync(transcriptPath, 'utf-8')
+  } catch {
+    return null
+  }
+
+  const lines = raw.split('\n').filter((l) => l.trim().length > 0)
+  if (lines.length === 0) return {}
+
+  // Walk backward looking for the last assistant message.
+  for (let i = lines.length - 1; i >= 0; i--) {
+    let parsed: TranscriptMessage | null
+    try {
+      const v = JSON.parse(lines[i]!)
+      parsed = v && typeof v === 'object' ? (v as TranscriptMessage) : null
+    } catch {
+      continue
+    }
+    if (!parsed || parsed.type !== 'assistant') continue
+    const msg = parsed.message
+    if (!msg || msg.role !== 'assistant') continue
+
+    const result: FinalResponse = {}
+
+    // stop_reason lives directly on the message envelope
+    const stopReason = (msg as Record<string, unknown>).stop_reason
+    if (typeof stopReason === 'string') result.stopReason = stopReason
+
+    const content = Array.isArray(msg.content) ? msg.content : []
+
+    if (captureText) {
+      // Concatenate every text block in order — Claude sometimes
+      // emits multiple text blocks per turn (split around tool_use).
+      const textParts: string[] = []
+      for (const c of content) {
+        if (c && c.type === 'text') {
+          const t = (c as Record<string, unknown>).text
+          if (typeof t === 'string' && t.length > 0) textParts.push(t)
+        }
+      }
+      if (textParts.length > 0) {
+        const joined = textParts.join('\n\n')
+        result.responseText =
+          joined.length > maxTextLength
+            ? joined.slice(0, maxTextLength) + '…'
+            : joined
+      }
+    }
+
+    if (captureThinking) {
+      // Pick the LAST thinking block in the turn — represents the
+      // assistant's most recent reasoning. Earlier ones are usually
+      // intermediate steps.
+      let lastThinking: string | undefined
+      for (const c of content) {
+        if (c && c.type === 'thinking') {
+          const t = (c as Record<string, unknown>).thinking
+          if (typeof t === 'string' && t.length > 0) lastThinking = t
+        }
+      }
+      if (lastThinking !== undefined) {
+        result.thinkingPreview =
+          lastThinking.length > maxThinkingLength
+            ? lastThinking.slice(0, maxThinkingLength) + '…'
+            : lastThinking
+      }
+    }
+
+    return result
+  }
+
+  return {}
+}
