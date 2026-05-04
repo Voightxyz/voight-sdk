@@ -123,7 +123,19 @@ export type LogError =
   | { code: 'unknown'; message: string }
 
 export type LogResponse =
-  | { ok: true; eventId?: string }
+  | {
+      ok: true
+      eventId?: string
+      /**
+       * Server-assigned agent CUID. May differ from the `agentId`
+       * the caller sent — when the client sends a label like
+       * `claude-code:Foo`, the server resolves it to the underlying
+       * Agent row's id. The Claude Code hook persists this to
+       * `.voight-agent-id` so subsequent events match by primary
+       * key (rename-proof, folder-move-proof).
+       */
+      agentId?: string
+    }
   | { ok: false; error: LogError }
 
 const DEFAULT_ENDPOINT = 'https://voight-production.up.railway.app'
@@ -254,8 +266,9 @@ export class Voight {
     if (res.ok) {
       const data = (await res.json().catch(() => ({}))) as {
         eventId?: string
+        agentId?: string
       }
-      return { ok: true, eventId: data.eventId }
+      return { ok: true, eventId: data.eventId, agentId: data.agentId }
     }
 
     const text = await res.text().catch(() => '')
@@ -316,7 +329,7 @@ export class Voight {
   private headers(): Record<string, string> {
     const headers: Record<string, string> = {
       'content-type': 'application/json',
-      'x-voight-sdk': `@voightxyz/sdk@0.3.3`,
+      'x-voight-sdk': `@voightxyz/sdk@0.3.4`,
     }
     if (this.apiKey) headers['authorization'] = `Bearer ${this.apiKey}`
     return headers

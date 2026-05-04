@@ -770,11 +770,29 @@ export async function runHook(): Promise<void> {
     return
   }
 
-  // Use the working directory the hook is firing in as a stable
-  // agent identifier. Falls back to the session id, then to a generic
-  // bucket. Users can override with VOIGHT_AGENT_ID.
+  // Stable agent identity. Resolution order:
+  //   1. VOIGHT_AGENT_ID env override (explicit, highest priority)
+  //   2. .voight-agent-id marker file in cwd (CUID written by server
+  //      after first event — survives folder rename, agent rename,
+  //      anything)
+  //   3. claude-code:<cwd basename> (legacy first-time label; server
+  //      will return its CUID and we'll write it to the marker for
+  //      future events)
+  //   4. claude-code:<session_id slice> when there's no cwd at all
+  //   5. 'claude-code:unknown' (true last resort)
+  const markerPath = evt.cwd ? join(evt.cwd, '.voight-agent-id') : null
+  let markerCuid: string | null = null
+  if (markerPath && existsSync(markerPath)) {
+    try {
+      const raw = readFileSync(markerPath, 'utf8').trim()
+      if (raw) markerCuid = raw
+    } catch {
+      /* unreadable marker — ignore, fall through to legacy label */
+    }
+  }
   const agentId =
     process.env.VOIGHT_AGENT_ID ||
+    markerCuid ||
     (evt.cwd ? `claude-code:${pathBasename(evt.cwd)}` : null) ||
     (evt.session_id ? `claude-code:${evt.session_id.slice(0, 8)}` : null) ||
     'claude-code:unknown'
@@ -803,8 +821,32 @@ export async function runHook(): Promise<void> {
       ? ((mapped.metadata as Record<string, unknown>).traceId as string)
       : undefined
   const res = await voight.log({ ...mapped, traceId })
-  if (!res.ok) dbg('log failed:', res.error)
-  else dbg('logged event', res.eventId)
+  if (!res.ok) {
+    dbg('log failed:', res.error)
+  } else {
+    dbg('logged event', res.eventId)
+    // First-time marker write: server returned the agent's CUID; if
+    // it differs from what we sent (because we sent a legacy label
+    // and the server resolved it to its row id), persist it so the
+    // next event matches by primary key. Idempotent — once written
+    // and matching, this no-ops.
+    if (
+      markerPath &&
+      res.agentId &&
+      res.agentId !== agentId &&
+      !process.env.VOIGHT_AGENT_ID
+    ) {
+      try {
+        writeFileSync(markerPath, res.agentId)
+        dbg('wrote .voight-agent-id', res.agentId)
+      } catch (err) {
+        // Read-only filesystem or no permissions — ignore. The next
+        // run will retry. Worst case we keep using the legacy label
+        // path forever, which still works.
+        dbg('marker write failed:', (err as Error).message)
+      }
+    }
+  }
 }
 
 function pathBasename(p: string): string {
