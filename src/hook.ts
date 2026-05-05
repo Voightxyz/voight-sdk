@@ -53,6 +53,11 @@ import {
   findUsageForTool,
   gcAttributionDir,
 } from './transcript.js'
+import {
+  consumeWakeupForPrompt,
+  gcWakeupDir,
+  recordWakeup,
+} from './wakeup.js'
 
 type HookEvent = {
   hook_event_name?: string
@@ -544,6 +549,14 @@ function mapEvent(evt: HookEvent): LogInput & { reasoning: string } {
       const detail = extractToolDetail(evt.tool_name, evt.tool_input)
       const key = durationKey(evt.session_id, evt.tool_name, evt.tool_input)
       rememberStart(key, Date.now())
+
+      // ScheduleWakeup persists its parameters so the next
+      // UserPromptSubmit (whenever it fires) can be tagged as a
+      // system-triggered prompt rather than a real user message.
+      if (evt.tool_name === 'ScheduleWakeup') {
+        recordWakeup(evt.session_id, evt.tool_input)
+      }
+
       return {
         type: 'action',
         toolExecuted: evt.tool_name,
@@ -671,13 +684,35 @@ function mapEvent(evt: HookEvent): LogInput & { reasoning: string } {
     case 'UserPromptSubmit': {
       const prompt = evt.prompt ?? ''
       const preview = truncate(prompt, 800)
+
+      // If this prompt was triggered by an earlier ScheduleWakeup we
+      // tag the *prompt origin* as system and surface delaySeconds +
+      // reason. Note we use `promptSource` rather than overwriting
+      // `source` (which already marks the framework — `claude-code`).
+      const wakeup = consumeWakeupForPrompt(evt.session_id, prompt)
+      const sourceMeta = wakeup
+        ? {
+            promptSource: 'system' as const,
+            wakeup: {
+              delaySeconds: wakeup.delaySeconds,
+              reason: wakeup.reason,
+              actualDelayMs: wakeup.actualDelayMs,
+              sentinel: wakeup.sentinel,
+            },
+          }
+        : { promptSource: 'user' as const }
+      const reasoning = wakeup
+        ? `[wakeup${wakeup.reason ? ` · ${truncate(wakeup.reason, 80)}` : ''}] ${preview ?? ''}`.trim()
+        : preview ?? 'user prompt'
+
       return {
         type: 'decision',
-        reasoning: preview ?? 'user prompt',
+        reasoning,
         outcome: 'success',
         input: { prompt: preview },
         metadata: {
           ...baseMeta,
+          ...sourceMeta,
           prompt_length: prompt.length,
         },
       }
@@ -779,6 +814,7 @@ function formatDuration(ms: number): string {
 export async function runHook(): Promise<void> {
   gcCacheOnce()
   gcAttributionDir()
+  gcWakeupDir()
 
   const apiKey = process.env.VOIGHT_KEY
   if (!apiKey) {
