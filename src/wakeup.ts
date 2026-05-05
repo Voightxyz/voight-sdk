@@ -54,6 +54,19 @@ const SENTINELS = new Set([
   '<<autonomous-loop>>',
 ])
 
+/**
+ * Cheap content-level detector. When the runtime delivers the literal
+ * sentinel text (e.g. a wakeup fires outside `/loop` mode, where the
+ * runtime does not resolve the sentinel back to instructions) we can
+ * still classify the prompt as system-sourced even if no pending
+ * record exists. Acts as a safety net for the case where two wakeups
+ * are scheduled in quick succession and the first match consumes the
+ * second's record.
+ */
+export function isSentinelPrompt(prompt: string | undefined): boolean {
+  return typeof prompt === 'string' && SENTINELS.has(prompt)
+}
+
 export type WakeupRecord = {
   prompt: string
   delaySeconds: number

@@ -14,6 +14,7 @@ import { existsSync, rmSync } from 'node:fs'
 
 import {
   consumeWakeupForPrompt,
+  isSentinelPrompt,
   recordWakeup,
   _internals,
 } from '../../src/wakeup.js'
@@ -152,6 +153,22 @@ describe('consumeWakeupForPrompt', () => {
     await new Promise((r) => setTimeout(r, 25))
     const match = consumeWakeupForPrompt(sid, 'p')
     expect(match?.actualDelayMs).toBeGreaterThanOrEqual(20)
+  })
+})
+
+describe('isSentinelPrompt', () => {
+  it('returns true for known sentinels', () => {
+    expect(isSentinelPrompt('<<autonomous-loop-dynamic>>')).toBe(true)
+    expect(isSentinelPrompt('<<autonomous-loop>>')).toBe(true)
+  })
+
+  it('returns false for everything else', () => {
+    expect(isSentinelPrompt('hello world')).toBe(false)
+    expect(isSentinelPrompt('')).toBe(false)
+    expect(isSentinelPrompt(undefined)).toBe(false)
+    // Near-misses must not match (no fuzzy detection — exact set only).
+    expect(isSentinelPrompt('<<autonomous-loop-dynamic')).toBe(false)
+    expect(isSentinelPrompt(' <<autonomous-loop-dynamic>> ')).toBe(false)
   })
 })
 

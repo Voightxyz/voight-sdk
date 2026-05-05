@@ -56,6 +56,7 @@ import {
 import {
   consumeWakeupForPrompt,
   gcWakeupDir,
+  isSentinelPrompt,
   recordWakeup,
 } from './wakeup.js'
 
@@ -689,21 +690,39 @@ function mapEvent(evt: HookEvent): LogInput & { reasoning: string } {
       // tag the *prompt origin* as system and surface delaySeconds +
       // reason. Note we use `promptSource` rather than overwriting
       // `source` (which already marks the framework — `claude-code`).
+      //
+      // Fallback: even with no pending record we treat the prompt
+      // as system-sourced if the literal text is a known sentinel
+      // (`<<autonomous-loop-dynamic>>` etc). The runtime delivers
+      // the sentinel raw outside `/loop` mode, and quick
+      // back-to-back ScheduleWakeup calls can leave the second
+      // firing without a record once the first match consumed it.
       const wakeup = consumeWakeupForPrompt(evt.session_id, prompt)
-      const sourceMeta = wakeup
-        ? {
-            promptSource: 'system' as const,
-            wakeup: {
-              delaySeconds: wakeup.delaySeconds,
-              reason: wakeup.reason,
-              actualDelayMs: wakeup.actualDelayMs,
-              sentinel: wakeup.sentinel,
-            },
-          }
-        : { promptSource: 'user' as const }
+      const fallbackSentinel = !wakeup && isSentinelPrompt(prompt)
+      let sourceMeta: Record<string, unknown>
+      if (wakeup) {
+        sourceMeta = {
+          promptSource: 'system' as const,
+          wakeup: {
+            delaySeconds: wakeup.delaySeconds,
+            reason: wakeup.reason,
+            actualDelayMs: wakeup.actualDelayMs,
+            sentinel: wakeup.sentinel,
+          },
+        }
+      } else if (fallbackSentinel) {
+        sourceMeta = {
+          promptSource: 'system' as const,
+          wakeup: { sentinel: true, fallback: true },
+        }
+      } else {
+        sourceMeta = { promptSource: 'user' as const }
+      }
       const reasoning = wakeup
         ? `[wakeup${wakeup.reason ? ` · ${truncate(wakeup.reason, 80)}` : ''}] ${preview ?? ''}`.trim()
-        : preview ?? 'user prompt'
+        : fallbackSentinel
+          ? `[wakeup · autonomous-loop] ${preview ?? ''}`.trim()
+          : preview ?? 'user prompt'
 
       return {
         type: 'decision',
