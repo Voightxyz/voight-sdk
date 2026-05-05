@@ -60,6 +60,7 @@ import {
   recordWakeup,
 } from './wakeup.js'
 import { gcGitDir, getGitContextCached } from './git.js'
+import { detectDenial } from './denials.js'
 
 type HookEvent = {
   hook_event_name?: string
@@ -584,6 +585,17 @@ function mapEvent(evt: HookEvent): LogInput & { reasoning: string } {
       const { failed, errorMessage } = detectFailure(tr)
       const responseTokens = extractTokens(tr)
 
+      // When the failure shape matches a permission-denial pattern
+      // (user rejected the prompt, settings forbade the tool, hook
+      // returned block, etc.) we promote the event to a distinct
+      // `denial` type so the dashboard can render it separately
+      // from real runtime errors. Real Bash "permission denied"
+      // failures don't match these patterns — they look like
+      // ordinary errors.
+      const denial = failed
+        ? detectDenial(evt.tool_name, errorMessage)
+        : null
+
       const key = durationKey(evt.session_id, evt.tool_name, evt.tool_input)
       const startedAt = consumeStart(key)
       const durationMs =
@@ -591,7 +603,7 @@ function mapEvent(evt: HookEvent): LogInput & { reasoning: string } {
 
       const durationStr =
         durationMs !== undefined ? ` (${formatDuration(durationMs)})` : ''
-      const prefix = failed ? '✗' : '✓'
+      const prefix = denial ? '⊘' : failed ? '✗' : '✓'
 
       // Look up the assistant message that initiated this tool call
       // in the local transcript. That message's `usage` is the real
@@ -670,10 +682,23 @@ function mapEvent(evt: HookEvent): LogInput & { reasoning: string } {
       // tokens (subagent only). Both shouldn't normally co-exist.
       const tokens = transcriptTokens ?? responseTokens
 
+      // Denial events keep `outcome: failed` (the tool didn't run)
+      // but sit under the `error` type today — the API has no
+      // dedicated 'denial' type column yet. The dashboard pivots
+      // off `metadata.denial` to render a distinct badge. When the
+      // server gains a first-class denial type we'll flip `type`
+      // to 'denial' here without touching the dashboard.
+      const denialReason = denial
+        ? denial.type.replace(/_/g, ' ')
+        : null
+      const reasoningLine = denial
+        ? `${prefix} ${detail.summary} · denied (${denialReason})${durationStr}`
+        : `${prefix} ${detail.summary}${durationStr}`
+
       return {
         type: failed ? 'error' : 'action',
         toolExecuted: evt.tool_name,
-        reasoning: `${prefix} ${detail.summary}${durationStr}`,
+        reasoning: reasoningLine,
         outcome: failed ? 'failed' : 'success',
         durationMs,
         errorMessage,
@@ -687,6 +712,7 @@ function mapEvent(evt: HookEvent): LogInput & { reasoning: string } {
           ...(tokens ? { tokens } : {}),
           ...(tokensBreakdown ? { tokensBreakdown } : {}),
           ...(transcriptModel ? { model: transcriptModel } : {}),
+          ...(denial ? { denial } : {}),
         },
       }
     }
