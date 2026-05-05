@@ -59,6 +59,7 @@ import {
   isSentinelPrompt,
   recordWakeup,
 } from './wakeup.js'
+import { gcGitDir, getGitContextCached } from './git.js'
 
 type HookEvent = {
   hook_event_name?: string
@@ -537,12 +538,19 @@ function mapEvent(evt: HookEvent): LogInput & { reasoning: string } {
     traceId = getTraceId(evt.session_id)
   }
 
+  // Git context — captured once per cwd with 30s caching so a burst
+  // of tool events doesn't pay the spawn cost. Returns null outside
+  // git repos. Lets every trace pin to the exact code state that
+  // produced it.
+  const git = getGitContextCached(evt.cwd)
+
   const baseMeta: Record<string, unknown> = {
     source: 'claude-code',
     hookEvent: event,
     sessionId: evt.session_id,
     cwd: evt.cwd,
     ...(traceId ? { traceId } : {}),
+    ...(git ? { git } : {}),
   }
 
   switch (event) {
@@ -834,6 +842,7 @@ export async function runHook(): Promise<void> {
   gcCacheOnce()
   gcAttributionDir()
   gcWakeupDir()
+  gcGitDir()
 
   const apiKey = process.env.VOIGHT_KEY
   if (!apiKey) {
