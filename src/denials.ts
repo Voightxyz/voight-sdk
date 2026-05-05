@@ -81,13 +81,17 @@ const PATTERNS: { type: DenialType; rx: RegExp }[] = [
     rx: /(requires\s+(user\s+)?(approval|permission|consent)|approval\s+required|non[\s-]?interactive\s+(mode|session))/i,
   },
 
-  // User-driven rejection — the most common case. Claude Code emits
-  // wording like "user rejected the tool call" / "user did not
-  // approve". We check this last because the previous patterns can
-  // also include the word "user" coincidentally.
+  // User-driven rejection — the most common case. Claude Code's
+  // actual rejection phrasing observed in the wild during 0.3.9
+  // testing was:
+  //   "The user doesn't want to proceed with this tool use. The tool
+  //    use was rejected (eg. if it was a file edit ...)"
+  // Plus the older / synonym shapes ("user rejected", "user denied",
+  // "user did not approve", etc.). Checked last because earlier
+  // patterns can incidentally include the word "user".
   {
     type: 'user_rejected',
-    rx: /(user\s+(rejected|denied|did\s+not\s+approve|cancel(?:l)?ed|declined))/i,
+    rx: /(user\s+(rejected|denied|did\s+not\s+approve|cancel(?:l)?ed|declined)|user\s+doesn'?t\s+want\s+to\s+proceed|tool[_\s]+(call|use)\s+(was|is)\s+rejected)/i,
   },
 ]
 

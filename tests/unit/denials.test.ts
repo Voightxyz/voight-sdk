@@ -50,6 +50,31 @@ describe('detectDenial — user_rejected', () => {
     ).toBe('user_rejected')
   })
 
+  it('matches the real Claude Code rejection phrasing (0.3.10 fix)', () => {
+    // This is the exact string Claude Code returns to the agent
+    // when the user clicks "no" on the interactive approval prompt.
+    // 0.3.9's regex missed it because it required the literal word
+    // "user" right before "rejected". Real message has it as
+    // "tool use was rejected" and "user doesn't want to proceed".
+    const realMessage =
+      "The user doesn't want to proceed with this tool use. " +
+      'The tool use was rejected (eg. if it was a file edit, the ' +
+      'new_string was NOT written to the file). STOP what you are ' +
+      'doing and wait for the user to tell you how to proceed.'
+    const r = detectDenial('WebFetch', realMessage)
+    expect(r?.type).toBe('user_rejected')
+    expect(r?.requestedTool).toBe('WebFetch')
+  })
+
+  it('matches "tool use was rejected" / "tool_use was rejected"', () => {
+    expect(
+      detectDenial('Bash', 'The tool use was rejected by the user.')?.type,
+    ).toBe('user_rejected')
+    expect(
+      detectDenial('Bash', 'tool_use was rejected by policy.')?.type,
+    ).toBe('user_rejected')
+  })
+
   it('matches "user denied" / "user cancelled" / "user declined"', () => {
     expect(detectDenial('Write', 'User denied the operation.')?.type).toBe(
       'user_rejected',
