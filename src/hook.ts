@@ -61,6 +61,7 @@ import {
 } from './wakeup.js'
 import { gcGitDir, getGitContextCached } from './git.js'
 import { detectDenial } from './denials.js'
+import { applyPrivacy, resolvePrivacyLevel } from './privacy.js'
 
 type HookEvent = {
   hook_event_name?: string
@@ -929,16 +930,27 @@ export async function runHook(): Promise<void> {
   })
 
   const mapped = mapEvent(evt)
+
+  // Apply the user's privacy choice BEFORE the network round-trip.
+  // Under 'minimal' the payload is reduced to metadata-only (tool
+  // names, timing, tokens). Under 'standard' every string leaf is
+  // run through the PII scrubber so credentials accidentally logged
+  // never leave this machine. 'full' is the legacy passthrough.
+  // The resolved level is also stamped onto every event's metadata
+  // so the dashboard can render a per-event chip.
+  const privacyLevel = resolvePrivacyLevel()
+  const filtered = applyPrivacy(mapped, privacyLevel)
+
   // Lift traceId from metadata to the top-level LogInput field so the
   // Voight client can ship it as a first-class column when the
   // backend gains a dedicated `traceId` field. Today it's also in
   // metadata.traceId so the dashboard already groups by it.
   const traceId =
-    typeof (mapped.metadata as Record<string, unknown> | undefined)?.traceId ===
+    typeof (filtered.metadata as Record<string, unknown> | undefined)?.traceId ===
     'string'
-      ? ((mapped.metadata as Record<string, unknown>).traceId as string)
+      ? ((filtered.metadata as Record<string, unknown>).traceId as string)
       : undefined
-  const res = await voight.log({ ...mapped, traceId })
+  const res = await voight.log({ ...filtered, traceId })
   if (!res.ok) {
     dbg('log failed:', res.error)
   } else {

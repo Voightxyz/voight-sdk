@@ -3,6 +3,7 @@
  *
  * Targets `~/.claude/settings.json` by default. Adds:
  *   - env.VOIGHT_KEY            (your Voight API key)
+ *   - env.VOIGHT_PRIVACY        (capture level: minimal | standard | full)
  *   - hooks.PreToolUse          (fires before any tool the agent runs)
  *   - hooks.PostToolUse         (fires after, with result)
  *   - hooks.UserPromptSubmit    (every prompt the user sends)
@@ -12,7 +13,8 @@
  * reads the JSON event from stdin and POSTs it to /v1/events.
  *
  * Idempotent — running twice doesn't duplicate hook entries; running
- * with a new key updates the env var.
+ * with a new key updates the env var. The privacy prompt shows the
+ * current value when re-running so the user can keep or change it.
  */
 
 import { homedir } from 'node:os'
@@ -20,7 +22,11 @@ import { join, dirname } from 'node:path'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { createInterface } from 'node:readline'
 
+import { isPrivacyLevel, type PrivacyLevel } from './privacy.js'
+
 type Target = 'claude' | 'cursor' | 'codex'
+
+const SETUP_DEFAULT_PRIVACY: PrivacyLevel = 'standard'
 
 const SUPPORTED_HOOKS = [
   'PreToolUse',
@@ -46,9 +52,14 @@ function targetSettingsPath(target: Target): string {
   }
 }
 
-function parseArgs(argv: string[]): { key?: string; target: Target } {
+export function parseArgs(argv: string[]): {
+  key?: string
+  target: Target
+  privacy?: PrivacyLevel
+} {
   let key: string | undefined
   let target: Target = 'claude'
+  let privacy: PrivacyLevel | undefined
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--key' && argv[i + 1]) {
@@ -61,9 +72,40 @@ function parseArgs(argv: string[]): { key?: string; target: Target } {
     } else if (a?.startsWith('--target=')) {
       const t = a.slice('--target='.length) as Target
       if (t === 'claude' || t === 'cursor' || t === 'codex') target = t
+    } else if (a === '--privacy' && argv[i + 1]) {
+      const parsed = parsePrivacyChoice(argv[++i] ?? '', null)
+      if (parsed) privacy = parsed
+    } else if (a?.startsWith('--privacy=')) {
+      const parsed = parsePrivacyChoice(a.slice('--privacy='.length), null)
+      if (parsed) privacy = parsed
     }
   }
-  return { key, target }
+  return { key, target, privacy }
+}
+
+/**
+ * Translate a wizard answer to a PrivacyLevel.
+ *
+ * Accepts `1` / `2` / `3` (the numeric menu shortcuts shown to the
+ * user) and `minimal` / `standard` / `full` (case-insensitive). An
+ * empty string falls back to `defaultLevel`. Anything else returns
+ * `null` so the caller can re-prompt without crashing.
+ *
+ * Pure function: no readline, no I/O. The wizard loops over it
+ * until a non-null value comes back.
+ */
+export function parsePrivacyChoice(
+  input: string,
+  defaultLevel: PrivacyLevel | null = SETUP_DEFAULT_PRIVACY,
+): PrivacyLevel | null {
+  const trimmed = input.trim()
+  if (trimmed.length === 0) return defaultLevel
+  if (trimmed === '1') return 'minimal'
+  if (trimmed === '2') return 'standard'
+  if (trimmed === '3') return 'full'
+  const lower = trimmed.toLowerCase()
+  if (isPrivacyLevel(lower)) return lower
+  return null
 }
 
 function ask(question: string): Promise<string> {
@@ -130,8 +172,66 @@ function writeSettings(path: string, settings: Record<string, any>): void {
   writeFileSync(path, JSON.stringify(settings, null, 2) + '\n', 'utf-8')
 }
 
+function readExistingPrivacy(
+  settings: Record<string, any>,
+): PrivacyLevel | undefined {
+  const env = settings?.env
+  if (!env || typeof env !== 'object') return undefined
+  const raw = env.VOIGHT_PRIVACY
+  if (typeof raw !== 'string') return undefined
+  const trimmed = raw.trim().toLowerCase()
+  return isPrivacyLevel(trimmed) ? trimmed : undefined
+}
+
+function printPrivacyMenu(currentValue: PrivacyLevel | undefined): void {
+  console.log('')
+  console.log('  Welcome to Voight. We capture telemetry from your AI agents')
+  console.log('  to help you debug, monitor, and audit. First, pick how much')
+  console.log('  to share:')
+  console.log('')
+  console.log('    1) Minimal   — metadata only (tool names, timing, outcomes).')
+  console.log('                   No prompts, responses, or file paths leave')
+  console.log('                   your machine.')
+  console.log('                   Best for regulated work or maximum privacy.')
+  console.log('')
+  console.log('    2) Standard  — full content + local PII scrubbing             ★')
+  console.log('                   We capture what your agent does and says, but')
+  console.log('                   anything that looks private (credentials, personal')
+  console.log('                   info, etc.) is redacted on your machine before')
+  console.log('                   leaving it.')
+  console.log('                   Best for most developers.')
+  console.log('')
+  console.log('    3) Full      — everything captured as-is. No filtering.')
+  console.log('                   You trust the operator with raw output.')
+  console.log('                   Best for solo dev / maximum debug detail.')
+  console.log('')
+  if (currentValue) {
+    console.log(`  Current setting: ${currentValue}. Press Enter to keep it,`)
+    console.log('  or pick a new level.')
+  }
+}
+
+async function askPrivacyLevel(
+  currentValue: PrivacyLevel | undefined,
+): Promise<PrivacyLevel> {
+  printPrivacyMenu(currentValue)
+  // If we have a current value re-runs default to it; otherwise the
+  // wizard's recommended default.
+  const defaultLevel = currentValue ?? SETUP_DEFAULT_PRIVACY
+  for (let attempts = 0; attempts < 5; attempts++) {
+    const prompt = `  Choose [1/2/3] (default: ${defaultLevel === 'minimal' ? '1' : defaultLevel === 'full' ? '3' : '2'}): `
+    const answer = await ask(prompt)
+    const parsed = parsePrivacyChoice(answer, defaultLevel)
+    if (parsed) return parsed
+    console.log('  Please answer 1, 2, 3, or press Enter for the default.')
+  }
+  // Five strikes: bail to default rather than loop forever.
+  console.log(`  Sticking with default: ${defaultLevel}.`)
+  return defaultLevel
+}
+
 export async function runSetup(argv: string[]): Promise<void> {
-  const { key: keyArg, target } = parseArgs(argv)
+  const { key: keyArg, target, privacy: privacyArg } = parseArgs(argv)
   const settingsPath = targetSettingsPath(target)
 
   console.log('')
@@ -139,6 +239,26 @@ export async function runSetup(argv: string[]): Promise<void> {
   console.log(`  ${settingsPath}`)
   console.log('')
 
+  // Read settings once so the privacy step can show the current value
+  // and the key step can layer on top of the same object.
+  const settings = readSettings(settingsPath)
+  const existingPrivacy = readExistingPrivacy(settings)
+
+  // ── Step 1: privacy level ────────────────────────────────────────
+  let privacy: PrivacyLevel
+  if (privacyArg) {
+    privacy = privacyArg
+  } else if (!process.stdin.isTTY) {
+    // Non-TTY (CI / agent install): apply the wizard's recommended
+    // default rather than prompt. The user can override with
+    // `--privacy=minimal|standard|full` or skip setup entirely (keeping
+    // their existing settings.json untouched if `existingPrivacy` set).
+    privacy = existingPrivacy ?? SETUP_DEFAULT_PRIVACY
+  } else {
+    privacy = await askPrivacyLevel(existingPrivacy)
+  }
+
+  // ── Step 2: API key ──────────────────────────────────────────────
   let key = keyArg ?? process.env.VOIGHT_KEY
   if (!key) {
     // We can't prompt when stdin isn't a TTY (e.g. when running inside
@@ -158,13 +278,17 @@ export async function runSetup(argv: string[]): Promise<void> {
       console.log('')
       console.log('       npx -y @voightxyz/sdk setup --key=YOUR_KEY')
       console.log('')
+      console.log('  Optional: pick a privacy level with')
+      console.log('       --privacy=minimal|standard|full   (default: standard)')
+      console.log('')
       console.log('  (or set the VOIGHT_KEY env var and re-run.)')
       console.log('')
       process.exit(2)
     }
 
-    console.log('  Need an API key — generate one at https://voight.xyz/dashboard')
-    key = await ask('  Paste your VOIGHT_KEY (vk_…): ')
+    console.log('')
+    console.log(`  ✓ ${capitalize(privacy)} mode. Now paste your Voight API key (vk_...):`)
+    key = await ask('  > ')
     if (!key) {
       console.error('  No key entered. Aborting.')
       process.exit(1)
@@ -174,11 +298,10 @@ export async function runSetup(argv: string[]): Promise<void> {
     console.warn(`  Heads up: keys usually start with vk_ — got "${key.slice(0, 8)}…"`)
   }
 
-  const settings = readSettings(settingsPath)
-
-  // env.VOIGHT_KEY
+  // ── Step 3: write settings.json ─────────────────────────────────
   if (!settings.env || typeof settings.env !== 'object') settings.env = {}
   settings.env.VOIGHT_KEY = key
+  settings.env.VOIGHT_PRIVACY = privacy
 
   // Hooks (idempotent)
   let added = 0
@@ -198,4 +321,8 @@ export async function runSetup(argv: string[]): Promise<void> {
   }
   console.log('  Watch them roll in: https://voight.xyz/dashboard')
   console.log('')
+}
+
+function capitalize(s: string): string {
+  return s.length > 0 ? s[0]!.toUpperCase() + s.slice(1) : s
 }
