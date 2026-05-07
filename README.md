@@ -53,6 +53,32 @@ await voight.log({
 
 Every event shows up live on your dashboard and in the public [Explorer](https://voight.xyz/explore). Anomaly detection and on-chain anchoring are automatic.
 
+## Privacy: pick what leaves your machine
+
+Voight's hosted backend reads whatever events you ship — the same trade-off any SaaS observability service makes. If you'd rather not trust the operator with raw content, the setup wizard tiers the capture:
+
+```
+$ npx -y @voightxyz/sdk setup
+  ...
+  1) Minimal   — metadata only (tool names, timing, outcomes, tokens, USD).
+                 No prompts, responses, or file paths leave your machine.
+  2) Standard  — full content + local PII scrubbing.            ★ recommended
+                 Credentials and personal info (API keys, JWTs, emails,
+                 credit cards, PEM blocks, phone) are redacted on your
+                 machine BEFORE transmission.
+  3) Full      — everything captured as-is. Backwards-compat default.
+```
+
+Tokens, USD spend, model names, and latency stats are numeric / tag data — they pass through unchanged in **all three** levels, so the dashboard's KPIs and charts work identically regardless of what you pick.
+
+The level lives in `~/.claude/settings.json` (`env.VOIGHT_PRIVACY`). Switch any time by re-running `npx -y @voightxyz/sdk setup` (the wizard remembers your current value), or override via env var for one session:
+
+```bash
+VOIGHT_PRIVACY=minimal claude   # or 'standard' / 'full'
+```
+
+Every event ships with `metadata.privacyLevel` so the dashboard can render a per-event chip and you can audit retroactively how each row was captured. Existing users on SDK ≤0.3.10 default to `full` until they re-run setup — there's no silent privacy upgrade.
+
 ## API
 
 ### `new Voight(options)`
