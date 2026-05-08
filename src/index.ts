@@ -329,7 +329,7 @@ export class Voight {
   private headers(): Record<string, string> {
     const headers: Record<string, string> = {
       'content-type': 'application/json',
-      'x-voight-sdk': `@voightxyz/sdk@0.4.1`,
+      'x-voight-sdk': `@voightxyz/sdk@0.4.2`,
     }
     if (this.apiKey) headers['authorization'] = `Bearer ${this.apiKey}`
     return headers

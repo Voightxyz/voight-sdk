@@ -222,7 +222,10 @@ function printPrivacyMenu(currentValue?: PrivacyLevel): void {
  */
 function printNonTtyWelcome(): void {
   printPrivacyMenu()
-  console.log('  Pick a number (1, 2, or 3) or a name (minimal / standard / full).')
+  console.log('  Pick a number (1, 2, or 3) or a name (minimal / standard / full),')
+  console.log('  then re-run with that choice as a flag. For example, to pick Standard:')
+  console.log('')
+  console.log('      npx -y @voightxyz/sdk setup --privacy=2')
   console.log('')
 }
 
