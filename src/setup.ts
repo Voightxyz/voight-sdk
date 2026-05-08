@@ -183,9 +183,9 @@ function readExistingPrivacy(
   return isPrivacyLevel(trimmed) ? trimmed : undefined
 }
 
-function printPrivacyMenu(currentValue: PrivacyLevel | undefined): void {
+function printPrivacyMenu(currentValue?: PrivacyLevel): void {
   console.log('')
-  console.log('  Welcome to Voight. We capture telemetry from your AI agents')
+  console.log('  👋 Welcome to Voight. We capture telemetry from your AI agents')
   console.log('  to help you debug, monitor, and audit. First, pick how much')
   console.log('  to share:')
   console.log('')
@@ -209,6 +209,65 @@ function printPrivacyMenu(currentValue: PrivacyLevel | undefined): void {
     console.log(`  Current setting: ${currentValue}. Press Enter to keep it,`)
     console.log('  or pick a new level.')
   }
+}
+
+/**
+ * Step 1 — non-TTY welcome / privacy menu.
+ *
+ * Shown when the user runs `npx setup` from inside a non-interactive
+ * shell (Claude Code's bash tool, CI, SSH script, …) without yet
+ * having picked a privacy level. The reader either pastes their
+ * choice into the chat (Claude figures out the re-invocation) or
+ * re-runs in their own terminal.
+ */
+function printNonTtyWelcome(): void {
+  printPrivacyMenu()
+  console.log('  Pick a number (1, 2, or 3) or a name (minimal / standard / full).')
+  console.log('')
+}
+
+/**
+ * Step 2 — non-TTY API-key instructions, after a privacy level was
+ * supplied but no key.
+ */
+function printNonTtyApiKeyInstructions(privacy: PrivacyLevel): void {
+  console.log('')
+  console.log(`  ✓ ${capitalize(privacy)} mode selected.`)
+  console.log('')
+  console.log('  Now we need your API key:')
+  console.log('')
+  console.log('    1. Open  → https://voight.xyz/dashboard')
+  console.log('    2. Sign in (Google / X / wallet — one click)')
+  console.log('    3. Settings → Generate key → copy the vk_… secret')
+  console.log('    4. Paste it here.')
+  console.log('')
+}
+
+/**
+ * Step 3 — final celebration. Used by both TTY and non-TTY flows
+ * once setup completes.
+ */
+function printDoneMessage(privacy: PrivacyLevel, addedHooks: number): void {
+  const hookWord = addedHooks === 1 ? 'hook' : 'hooks'
+  console.log('')
+  console.log("  🎉 You're all set!")
+  console.log('')
+  console.log(`    ✓ ${capitalize(privacy)} mode enabled`)
+  console.log(`    ✓ ${addedHooks} ${hookWord} wired into Claude Code`)
+  console.log('    ✓ API key configured')
+  console.log('')
+  console.log('    → See your agent live: https://voight.xyz/dashboard')
+  console.log('')
+}
+
+/**
+ * Resolve an existing API key from a settings.json blob. When the
+ * user re-runs setup to update only the privacy level (or other
+ * field), we keep the existing key rather than asking again.
+ */
+function readExistingKey(settings: Record<string, any>): string | undefined {
+  const v = settings?.env?.VOIGHT_KEY
+  return typeof v === 'string' && v.length > 0 ? v : undefined
 }
 
 async function askPrivacyLevel(
@@ -243,84 +302,77 @@ export async function runSetup(argv: string[]): Promise<void> {
   // and the key step can layer on top of the same object.
   const settings = readSettings(settingsPath)
   const existingPrivacy = readExistingPrivacy(settings)
+  const existingKey = readExistingKey(settings)
 
-  // ── Step 1: privacy level ────────────────────────────────────────
-  let privacy: PrivacyLevel
-  if (privacyArg) {
-    privacy = privacyArg
-  } else if (!process.stdin.isTTY) {
-    // Non-TTY (CI / agent install): apply the wizard's recommended
-    // default rather than prompt. The user can override with
-    // `--privacy=minimal|standard|full` or skip setup entirely (keeping
-    // their existing settings.json untouched if `existingPrivacy` set).
-    privacy = existingPrivacy ?? SETUP_DEFAULT_PRIVACY
-  } else {
-    privacy = await askPrivacyLevel(existingPrivacy)
+  // Resolve privacy: flag → env → existing settings.json. If none,
+  // we'll either prompt (TTY) or exit at step 1 (non-TTY).
+  let privacy: PrivacyLevel | undefined = privacyArg
+  if (!privacy && typeof process.env.VOIGHT_PRIVACY === 'string') {
+    const fromEnv = parsePrivacyChoice(process.env.VOIGHT_PRIVACY, null)
+    if (fromEnv) privacy = fromEnv
   }
+  if (!privacy) privacy = existingPrivacy
 
-  // ── Step 2: API key ──────────────────────────────────────────────
-  let key = keyArg ?? process.env.VOIGHT_KEY
-  if (!key) {
-    // We can't prompt when stdin isn't a TTY (e.g. when running inside
-    // Claude Code's bash tool, an SSH script, or any other agent). Bail
-    // with a message that's friendly for both the human reading their
-    // terminal AND the AI assistant orchestrating the install.
-    if (!process.stdin.isTTY) {
+  // Resolve key: flag → env → existing settings.json. Existing key
+  // is reused so re-runs that only update privacy don't force a
+  // re-paste of the secret.
+  let key = keyArg ?? process.env.VOIGHT_KEY ?? existingKey
+
+  if (!process.stdin.isTTY) {
+    // Non-TTY (Claude Code chat, CI, SSH, …): drive the same 3-step
+    // flow as TTY but via discrete CLI invocations. Each step prints
+    // an instruction and exits; the user (or the AI agent reading
+    // the output) supplies the next piece and re-invokes.
+    if (!privacy) {
+      // Step 1 — Welcome + privacy menu.
+      printNonTtyWelcome()
+      process.exit(2)
+    }
+    if (!key) {
+      // Step 2 — API key instructions for the chosen level.
+      printNonTtyApiKeyInstructions(privacy)
+      process.exit(2)
+    }
+    // Both supplied → fall through to step 3 (actual setup).
+  } else {
+    // TTY interactive flow.
+    if (!privacy) {
+      privacy = await askPrivacyLevel(existingPrivacy)
+    }
+    if (!key) {
       console.log('')
-      console.log('  ────────────────────────────────────────────────')
-      console.log('  Voight setup needs your API key to continue.')
-      console.log('  ────────────────────────────────────────────────')
+      console.log(`  ✓ ${capitalize(privacy)} mode selected.`)
+      console.log('')
+      console.log('  Now we need your API key:')
       console.log('')
       console.log('    1. Open  → https://voight.xyz/dashboard')
       console.log('    2. Sign in (Google / X / wallet — one click)')
       console.log('    3. Settings → Generate key → copy the vk_… secret')
-      console.log('    4. Re-run:')
       console.log('')
-      console.log('       npx -y @voightxyz/sdk setup --key=YOUR_KEY')
-      console.log('')
-      console.log('  Optional: pick a privacy level with')
-      console.log('       --privacy=minimal|standard|full   (default: standard)')
-      console.log('')
-      console.log('  (or set the VOIGHT_KEY env var and re-run.)')
-      console.log('')
-      process.exit(2)
-    }
-
-    console.log('')
-    console.log(`  ✓ ${capitalize(privacy)} mode. Now paste your Voight API key (vk_...):`)
-    key = await ask('  > ')
-    if (!key) {
-      console.error('  No key entered. Aborting.')
-      process.exit(1)
+      key = await ask('  Paste it here: ')
+      if (!key) {
+        console.error('  No key entered. Aborting.')
+        process.exit(1)
+      }
     }
   }
+
   if (!key.startsWith('vk_')) {
     console.warn(`  Heads up: keys usually start with vk_ — got "${key.slice(0, 8)}…"`)
   }
 
-  // ── Step 3: write settings.json ─────────────────────────────────
+  // ── Step 3: write settings.json + hooks ─────────────────────────
   if (!settings.env || typeof settings.env !== 'object') settings.env = {}
   settings.env.VOIGHT_KEY = key
   settings.env.VOIGHT_PRIVACY = privacy
 
-  // Hooks (idempotent)
   let added = 0
   for (const h of SUPPORTED_HOOKS) {
     if (ensureHook(settings, h)) added++
   }
-
   writeSettings(settingsPath, settings)
 
-  console.log('')
-  console.log(`  ✓ wired up — ${added} new hook${added === 1 ? '' : 's'} added`)
-  console.log('')
-  if (target === 'claude') {
-    console.log('  Restart Claude Code (or open a new chat) to start streaming events.')
-  } else {
-    console.log(`  Restart ${target} to start streaming events.`)
-  }
-  console.log('  Watch them roll in: https://voight.xyz/dashboard')
-  console.log('')
+  printDoneMessage(privacy, added)
 }
 
 function capitalize(s: string): string {
