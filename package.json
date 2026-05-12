@@ -20,7 +20,7 @@
   "bugs": {
     "url": "https://github.com/voightxyz/voight-sdk/issues"
   },
-  "license": "MIT",
+  "license": "Apache-2.0",
   "author": "Voight (https://voight.xyz)",
   "type": "module",
   "main": "./dist/index.cjs",
