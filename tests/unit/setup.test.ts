@@ -12,8 +12,11 @@ import { describe, it, expect } from 'vitest'
 
 import {
   detectTarget,
+  ensureCursorHook,
   frameworkName,
+  generateCursorHookScript,
   parseArgs,
+  parseCursorScriptEnv,
   parsePrivacyChoice,
 } from '../../src/setup.js'
 
@@ -125,6 +128,117 @@ describe('detectTarget', () => {
         TERM_PROGRAM: undefined,
       }),
     ).toBeUndefined()
+  })
+})
+
+describe('generateCursorHookScript', () => {
+  it('writes a bash wrapper exporting key + privacy then exec-ing the hook', () => {
+    const out = generateCursorHookScript('vk_abc123', 'standard')
+    expect(out).toContain('#!/usr/bin/env bash')
+    expect(out).toContain('export VOIGHT_KEY="vk_abc123"')
+    expect(out).toContain('export VOIGHT_PRIVACY="standard"')
+    expect(out).toContain('exec npx -y @voightxyz/sdk hook')
+  })
+
+  it('reflects whichever privacy level is passed', () => {
+    expect(generateCursorHookScript('vk_x', 'minimal')).toContain(
+      'export VOIGHT_PRIVACY="minimal"',
+    )
+    expect(generateCursorHookScript('vk_x', 'full')).toContain(
+      'export VOIGHT_PRIVACY="full"',
+    )
+  })
+})
+
+describe('parseCursorScriptEnv', () => {
+  it('extracts both key and privacy from a generated script', () => {
+    const script = generateCursorHookScript('vk_xyz', 'standard')
+    expect(parseCursorScriptEnv(script)).toEqual({
+      key: 'vk_xyz',
+      privacy: 'standard',
+    })
+  })
+
+  it('returns undefined fields when nothing matches', () => {
+    expect(parseCursorScriptEnv('echo hi')).toEqual({
+      key: undefined,
+      privacy: undefined,
+    })
+  })
+
+  it('drops privacy when the value is not a known level', () => {
+    // A stale script that somehow has an unknown level should fall
+    // through to the wizard's default rather than crash or be trusted.
+    const script =
+      '#!/usr/bin/env bash\nexport VOIGHT_KEY="vk_x"\nexport VOIGHT_PRIVACY="paranoid"\n'
+    expect(parseCursorScriptEnv(script)).toEqual({
+      key: 'vk_x',
+      privacy: undefined,
+    })
+  })
+
+  it('round-trips through generateCursorHookScript', () => {
+    // The two halves of the adapter must stay in sync: whatever
+    // generate writes, parse must read back. Guards against future
+    // edits to one half forgetting the other.
+    const key = 'vk_round-trip-test'
+    const privacy = 'minimal'
+    const parsed = parseCursorScriptEnv(generateCursorHookScript(key, privacy))
+    expect(parsed).toEqual({ key, privacy })
+  })
+})
+
+describe('ensureCursorHook', () => {
+  it('adds a fresh entry when the event has no hooks at all', () => {
+    const hooks: Record<string, unknown[]> = {}
+    const result = ensureCursorHook(hooks, 'preToolUse')
+    expect(result).toBe('added')
+    expect(hooks.preToolUse).toEqual([
+      { command: './hooks/voight.sh', failClosed: false },
+    ])
+  })
+
+  it('preserves unrelated entries the user has configured', () => {
+    const hooks: Record<string, unknown[]> = {
+      preToolUse: [{ command: './hooks/format.sh' }],
+    }
+    ensureCursorHook(hooks, 'preToolUse')
+    expect(hooks.preToolUse).toHaveLength(2)
+    expect((hooks.preToolUse as any)[0].command).toBe('./hooks/format.sh')
+    expect((hooks.preToolUse as any)[1].command).toBe('./hooks/voight.sh')
+  })
+
+  it('does not duplicate Voight when re-running setup', () => {
+    const hooks: Record<string, unknown[]> = {
+      preToolUse: [{ command: './hooks/voight.sh', failClosed: false }],
+    }
+    const result = ensureCursorHook(hooks, 'preToolUse')
+    expect(result).toBe('unchanged')
+    expect(hooks.preToolUse).toHaveLength(1)
+  })
+
+  it('updates legacy direct-npx Voight entries to point at the wrapper', () => {
+    // Older SDK or hand-written installs may have inserted a direct
+    // 'npx -y @voightxyz/sdk hook' command. Upgrade in place rather
+    // than appending a duplicate.
+    const hooks: Record<string, unknown[]> = {
+      preToolUse: [{ command: 'npx -y @voightxyz/sdk hook' }],
+    }
+    const result = ensureCursorHook(hooks, 'preToolUse')
+    expect(result).toBe('updated')
+    expect((hooks.preToolUse as any)[0].command).toBe('./hooks/voight.sh')
+    expect(hooks.preToolUse).toHaveLength(1)
+  })
+
+  it('resets a malformed (non-array) entry to a fresh array', () => {
+    // Defensive: if hooks.json got hand-edited into a broken shape,
+    // we still succeed in wiring Voight rather than crashing.
+    const hooks: Record<string, unknown[]> = {
+      preToolUse: 'not an array' as unknown as unknown[],
+    }
+    const result = ensureCursorHook(hooks, 'preToolUse')
+    expect(result).toBe('added')
+    expect(Array.isArray(hooks.preToolUse)).toBe(true)
   })
 })
 
