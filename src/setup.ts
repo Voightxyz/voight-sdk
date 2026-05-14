@@ -80,7 +80,14 @@ export function detectTarget(
   if (env.TERM_PROGRAM === 'cursor') return 'cursor'
   if (env.CLAUDECODE === '1') return 'claude'
   if (env.CLAUDE_CODE_SSE_PORT) return 'claude'
-  if (env.CODEX_SESSION_ID) return 'codex'
+  // Codex Desktop sets CODEX_THREAD_ID on every spawned subprocess
+  // (unique per thread). Fallback to CODEX_SHELL or the macOS
+  // bundle identifier for older builds that might not include
+  // THREAD_ID. Strings extracted from /Applications/Codex.app
+  // binary 2026-05-14.
+  if (env.CODEX_THREAD_ID) return 'codex'
+  if (env.CODEX_SHELL === '1') return 'codex'
+  if (env.__CFBundleIdentifier === 'com.openai.codex') return 'codex'
   return undefined
 }
 
@@ -108,7 +115,19 @@ function targetSettingsPath(target: Target): string {
       // a different schema; see writeCursorHooks() below.
       return join(homedir(), '.cursor', 'hooks.json')
     case 'codex':
-      return join(homedir(), '.codex', 'settings.json')
+      // Codex uses a marketplace plugin model. The wizard header
+      // displays the marketplace manifest path; the actual files
+      // written are scattered across the marketplace tree (see
+      // writeCodexPlugin below).
+      return join(
+        homedir(),
+        '.codex',
+        'plugins',
+        'voight-marketplace',
+        '.agents',
+        'plugins',
+        'marketplace.json',
+      )
   }
 }
 
@@ -322,6 +341,301 @@ function writeCursorHooks(
 }
 
 // ─── End Cursor adapter ──────────────────────────────────────────
+
+// ─── Codex adapter ───────────────────────────────────────────────
+//
+// Codex (OpenAI's desktop coding agent, model gpt-5.5 as of
+// 2026-05) exposes hooks the same way Claude Code does
+// (PascalCase: PreToolUse / PostToolUse / UserPromptSubmit / Stop
+// / SubagentStop / PreCompact / PostCompact). The SDK's existing
+// hook.ts dispatcher processes those events already — no new
+// mapper needed.
+//
+// The difference is *where* hooks are registered. Codex requires
+// a plugin under a marketplace; user-level hooks.json is not
+// supported. Local marketplaces with `source_type = "local"` ARE
+// supported (verified in the bundled openai-bundled marketplace),
+// so the setup wizard writes the entire marketplace + plugin
+// scaffold under ~/.codex/plugins/voight-marketplace/ and edits
+// ~/.codex/config.toml to enable it. No external repo needed.
+//
+// Spec source: /Applications/Codex.app binary strings + figma
+// plugin reference at ~/.codex/.tmp/plugins/plugins/figma/.
+
+const CODEX_HOOK_EVENTS = [
+  'PreToolUse',
+  'PostToolUse',
+  'UserPromptSubmit',
+  'Stop',
+  'SubagentStop',
+  'PreCompact',
+  'PostCompact',
+] as const
+
+const CODEX_PLUGIN_NAME = 'voight'
+const CODEX_MARKETPLACE_NAME = 'voight'
+const CODEX_PLUGIN_ID = 'xyz.voight.observability'
+
+function codexHome(): string {
+  return process.env.CODEX_HOME ?? join(homedir(), '.codex')
+}
+
+function codexMarketplaceRoot(): string {
+  return join(codexHome(), 'plugins', `${CODEX_MARKETPLACE_NAME}-marketplace`)
+}
+
+function codexPluginRoot(): string {
+  return join(codexMarketplaceRoot(), 'plugins', CODEX_PLUGIN_NAME)
+}
+
+function codexMarketplaceManifestPath(): string {
+  return join(codexMarketplaceRoot(), '.agents', 'plugins', 'marketplace.json')
+}
+
+function codexPluginManifestPath(): string {
+  return join(codexPluginRoot(), 'plugin.lock.json')
+}
+
+function codexPluginHooksPath(): string {
+  return join(codexPluginRoot(), 'hooks.json')
+}
+
+function codexPluginScriptPath(): string {
+  return join(codexPluginRoot(), 'scripts', 'voight-hook.sh')
+}
+
+function codexConfigPath(): string {
+  return join(codexHome(), 'config.toml')
+}
+
+/**
+ * Render the marketplace manifest. Declares one plugin (Voight)
+ * with a local source. Codex's plugin engine reads this when the
+ * marketplace is registered via [marketplaces.voight] in
+ * config.toml.
+ */
+export function generateCodexMarketplaceManifest(): string {
+  const body = {
+    name: CODEX_MARKETPLACE_NAME,
+    interface: {
+      displayName: 'Voight',
+    },
+    plugins: [
+      {
+        name: CODEX_PLUGIN_NAME,
+        source: {
+          source: 'local',
+          path: `./plugins/${CODEX_PLUGIN_NAME}`,
+        },
+        policy: {
+          installation: 'AVAILABLE',
+          authentication: 'NONE',
+        },
+        category: 'Engineering',
+      },
+    ],
+  }
+  return JSON.stringify(body, null, 2) + '\n'
+}
+
+/**
+ * Render the plugin lock manifest. Minimal — just identification
+ * + a timestamp so Codex can fingerprint the install.
+ */
+export function generateCodexPluginManifest(
+  generatedAt: string = new Date().toISOString(),
+): string {
+  const body = {
+    lockVersion: 1,
+    pluginId: CODEX_PLUGIN_ID,
+    pluginVersion: '0.6.0',
+    generatedBy: '@voightxyz/sdk setup',
+    generatedAt,
+  }
+  return JSON.stringify(body, null, 2) + '\n'
+}
+
+/**
+ * Render the hooks.json that wires our wrapper script to each of
+ * the events the hook handler can map. Same PascalCase shape Claude
+ * Code uses — `hook.ts` processes these without changes.
+ *
+ * Matchers: tool-firing events (`Pre/PostToolUse`) take a `*` so we
+ * see every tool; lifecycle events don't need a matcher.
+ */
+export function generateCodexHooksJson(): string {
+  const command = `./scripts/voight-hook.sh`
+  const hooks: Record<string, unknown[]> = {}
+  for (const event of CODEX_HOOK_EVENTS) {
+    const entry: Record<string, unknown> = {
+      hooks: [{ type: 'command', command }],
+    }
+    if (event === 'PreToolUse' || event === 'PostToolUse') {
+      entry.matcher = '*'
+    }
+    hooks[event] = [entry]
+  }
+  return JSON.stringify({ hooks }, null, 2) + '\n'
+}
+
+/**
+ * Render the wrapper script that Codex invokes for each hook.
+ * Mirrors the Cursor wrapper: env vars set here (Codex's hook
+ * runtime inherits, but having an explicit export keeps the
+ * subprocess self-contained against future runtime changes).
+ */
+export function generateCodexHookScript(
+  key: string,
+  privacy: PrivacyLevel,
+): string {
+  return `#!/usr/bin/env bash
+# Voight observability hook wrapper for Codex.
+#
+# Codex's plugin hooks invoke this script for each registered
+# event. We export the SDK's env vars here and exec into the npm-
+# published hook handler, which translates Codex's PascalCase
+# events into Voight's LogInput shape (same path Claude Code uses).
+#
+# Regenerated by 'npx -y @voightxyz/sdk setup'; hand-edits will
+# be overwritten on the next run.
+
+export VOIGHT_KEY="${key}"
+export VOIGHT_PRIVACY="${privacy}"
+exec npx -y @voightxyz/sdk hook
+`
+}
+
+/**
+ * Pure: parse our env vars back out of an existing wrapper script
+ * so re-runs can show the current values. Mirrors Cursor's
+ * parseCursorScriptEnv for symmetry across adapters.
+ */
+export function parseCodexScriptEnv(content: string): {
+  key?: string
+  privacy?: PrivacyLevel
+} {
+  const keyMatch = content.match(/VOIGHT_KEY="([^"]+)"/)
+  const privMatch = content.match(/VOIGHT_PRIVACY="(\w+)"/)
+  const key = keyMatch ? keyMatch[1] : undefined
+  const privRaw = privMatch ? privMatch[1] : undefined
+  const privacy =
+    privRaw && isPrivacyLevel(privRaw) ? (privRaw as PrivacyLevel) : undefined
+  return { key, privacy }
+}
+
+function readExistingCodexState(): { key?: string; privacy?: PrivacyLevel } {
+  const scriptPath = codexPluginScriptPath()
+  if (!existsSync(scriptPath)) return {}
+  try {
+    return parseCodexScriptEnv(readFileSync(scriptPath, 'utf-8'))
+  } catch {
+    return {}
+  }
+}
+
+/**
+ * Append our marketplace + plugin registration to ~/.codex/config.toml,
+ * idempotently. We *only* append — existing entries are detected
+ * by section header presence and skipped to preserve user edits
+ * and avoid TOML parse complications.
+ *
+ * Backup written to config.toml.voight-backup before any change
+ * so the user can revert if Codex complains.
+ *
+ * Returns true if config was modified, false if no changes were
+ * needed (already registered).
+ */
+export function appendCodexConfigRegistration(
+  existing: string,
+  marketplaceSourceAbsPath: string,
+  nowIso: string = new Date().toISOString(),
+): { content: string; changed: boolean } {
+  const hasMarketplace = /\[marketplaces\.voight\][\s\S]/.test(existing)
+  const hasPlugin = /\[plugins\."voight@voight"\][\s\S]/.test(existing)
+
+  if (hasMarketplace && hasPlugin) {
+    return { content: existing, changed: false }
+  }
+
+  const lines: string[] = []
+  // Ensure the file ends with a newline before our additions.
+  let content = existing
+  if (content.length > 0 && !content.endsWith('\n')) content += '\n'
+  // Blank line separator unless the file is empty.
+  if (content.trim().length > 0) lines.push('')
+
+  if (!hasMarketplace) {
+    lines.push('[marketplaces.voight]')
+    lines.push(`last_updated = "${nowIso}"`)
+    lines.push('source_type = "local"')
+    lines.push(`source = "${marketplaceSourceAbsPath}"`)
+    lines.push('')
+  }
+
+  if (!hasPlugin) {
+    lines.push('[plugins."voight@voight"]')
+    lines.push('enabled = true')
+    lines.push('')
+  }
+
+  return { content: content + lines.join('\n'), changed: true }
+}
+
+/**
+ * Write the Codex plugin scaffold + edit config.toml. Idempotent:
+ * re-running regenerates files in place and skips already-present
+ * config sections.
+ */
+function writeCodexPlugin(
+  key: string,
+  privacy: PrivacyLevel,
+): { pluginRoot: string; configChanged: boolean } {
+  const root = codexMarketplaceRoot()
+  const pluginRoot = codexPluginRoot()
+  const scriptPath = codexPluginScriptPath()
+
+  // 1. Marketplace manifest
+  const mpPath = codexMarketplaceManifestPath()
+  mkdirSync(dirname(mpPath), { recursive: true })
+  writeFileSync(mpPath, generateCodexMarketplaceManifest(), 'utf-8')
+
+  // 2. Plugin manifest
+  const pluginPath = codexPluginManifestPath()
+  mkdirSync(dirname(pluginPath), { recursive: true })
+  writeFileSync(pluginPath, generateCodexPluginManifest(), 'utf-8')
+
+  // 3. hooks.json
+  writeFileSync(codexPluginHooksPath(), generateCodexHooksJson(), 'utf-8')
+
+  // 4. wrapper script + chmod +x
+  mkdirSync(dirname(scriptPath), { recursive: true })
+  writeFileSync(scriptPath, generateCodexHookScript(key, privacy), 'utf-8')
+  try {
+    chmodSync(scriptPath, 0o755)
+  } catch {
+    /* non-POSIX filesystem — Codex is Mac/Linux today, harmless */
+  }
+
+  // 5. config.toml — append marketplace + plugin registration
+  const configPath = codexConfigPath()
+  const existing = existsSync(configPath)
+    ? readFileSync(configPath, 'utf-8')
+    : ''
+  const { content, changed } = appendCodexConfigRegistration(existing, root)
+  if (changed) {
+    // Backup before writing so the user can revert if Codex
+    // complains about the new sections.
+    if (existing.length > 0) {
+      writeFileSync(`${configPath}.voight-backup`, existing, 'utf-8')
+    }
+    mkdirSync(dirname(configPath), { recursive: true })
+    writeFileSync(configPath, content, 'utf-8')
+  }
+
+  return { pluginRoot, configChanged: changed }
+}
+
+// ─── End Codex adapter ───────────────────────────────────────────
 
 /**
  * Parse the CLI flags. Returns only the values the user explicitly
@@ -608,6 +922,10 @@ export async function runSetup(argv: string[]): Promise<void> {
     const state = readExistingCursorState()
     existingPrivacy = state.privacy
     existingKey = state.key
+  } else if (target === 'codex') {
+    const state = readExistingCodexState()
+    existingPrivacy = state.privacy
+    existingKey = state.key
   } else {
     claudeSettings = readSettings(settingsPath)
     existingPrivacy = readExistingPrivacy(claudeSettings)
@@ -677,9 +995,14 @@ export async function runSetup(argv: string[]): Promise<void> {
     // Cursor: dedicated hooks.json schema + wrapper script for env.
     const result = writeCursorHooks(key, privacy)
     added = result.added
+  } else if (target === 'codex') {
+    // Codex: local marketplace + plugin scaffold + config.toml
+    // edit. Same 7 PascalCase events Claude Code uses, so hook.ts
+    // processes them unchanged.
+    writeCodexPlugin(key, privacy)
+    added = CODEX_HOOK_EVENTS.length
   } else {
-    // Claude Code (and Codex which still uses the scaffolded
-    // Claude-style format pending a dedicated adapter).
+    // Claude Code.
     if (!claudeSettings.env || typeof claudeSettings.env !== 'object') {
       claudeSettings.env = {}
     }

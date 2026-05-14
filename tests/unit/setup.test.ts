@@ -11,11 +11,17 @@
 import { describe, it, expect } from 'vitest'
 
 import {
+  appendCodexConfigRegistration,
   detectTarget,
   ensureCursorHook,
   frameworkName,
+  generateCodexHookScript,
+  generateCodexHooksJson,
+  generateCodexMarketplaceManifest,
+  generateCodexPluginManifest,
   generateCursorHookScript,
   parseArgs,
+  parseCodexScriptEnv,
   parseCursorScriptEnv,
   parsePrivacyChoice,
 } from '../../src/setup.js'
@@ -104,8 +110,22 @@ describe('detectTarget', () => {
     expect(detectTarget({ CLAUDE_CODE_SSE_PORT: '12345' })).toBe('claude')
   })
 
-  it('detects Codex via CODEX_SESSION_ID', () => {
-    expect(detectTarget({ CODEX_SESSION_ID: 'sess_abc' })).toBe('codex')
+  it('detects Codex via CODEX_THREAD_ID', () => {
+    // Codex Desktop sets this in every spawned subprocess (unique
+    // per thread). Verified empirically against Codex 5.3 on macOS.
+    expect(
+      detectTarget({ CODEX_THREAD_ID: '019c6939-0e84-7b53-8a4e-eae4569b0119' }),
+    ).toBe('codex')
+  })
+
+  it('detects Codex via CODEX_SHELL fallback', () => {
+    expect(detectTarget({ CODEX_SHELL: '1' })).toBe('codex')
+  })
+
+  it('detects Codex via macOS bundle identifier fallback', () => {
+    expect(
+      detectTarget({ __CFBundleIdentifier: 'com.openai.codex' }),
+    ).toBe('codex')
   })
 
   it('Cursor wins over Claude when both signals are present', () => {
@@ -287,5 +307,147 @@ describe('frameworkName', () => {
     expect(frameworkName('claude')).toBe('Claude Code')
     expect(frameworkName('cursor')).toBe('Cursor')
     expect(frameworkName('codex')).toBe('Codex')
+  })
+})
+
+describe('generateCodexMarketplaceManifest', () => {
+  it('declares one local plugin under the voight marketplace', () => {
+    const out = JSON.parse(generateCodexMarketplaceManifest())
+    expect(out.name).toBe('voight')
+    expect(out.interface.displayName).toBe('Voight')
+    expect(out.plugins).toHaveLength(1)
+    expect(out.plugins[0]).toMatchObject({
+      name: 'voight',
+      source: { source: 'local', path: './plugins/voight' },
+    })
+  })
+})
+
+describe('generateCodexPluginManifest', () => {
+  it('emits a lock-version-1 manifest pinning the plugin id', () => {
+    const out = JSON.parse(generateCodexPluginManifest('2026-05-14T20:00:00Z'))
+    expect(out.lockVersion).toBe(1)
+    expect(out.pluginId).toBe('xyz.voight.observability')
+    expect(out.generatedAt).toBe('2026-05-14T20:00:00Z')
+  })
+})
+
+describe('generateCodexHooksJson', () => {
+  it('wires all 7 PascalCase events to the wrapper script', () => {
+    const out = JSON.parse(generateCodexHooksJson())
+    const expected = [
+      'PreToolUse',
+      'PostToolUse',
+      'UserPromptSubmit',
+      'Stop',
+      'SubagentStop',
+      'PreCompact',
+      'PostCompact',
+    ]
+    expect(Object.keys(out.hooks).sort()).toEqual(expected.sort())
+    for (const ev of expected) {
+      const entries = out.hooks[ev]
+      expect(entries[0].hooks[0].command).toBe('./scripts/voight-hook.sh')
+      expect(entries[0].hooks[0].type).toBe('command')
+    }
+  })
+
+  it('adds matchers for tool-firing events only', () => {
+    const out = JSON.parse(generateCodexHooksJson())
+    // Pre/PostToolUse take '*' so we see every tool.
+    expect(out.hooks.PreToolUse[0].matcher).toBe('*')
+    expect(out.hooks.PostToolUse[0].matcher).toBe('*')
+    // Lifecycle events don't take a matcher.
+    expect(out.hooks.Stop[0].matcher).toBeUndefined()
+    expect(out.hooks.UserPromptSubmit[0].matcher).toBeUndefined()
+  })
+})
+
+describe('generateCodexHookScript', () => {
+  it('exports the env vars then execs into the npx hook handler', () => {
+    const out = generateCodexHookScript('vk_xyz', 'standard')
+    expect(out).toContain('#!/usr/bin/env bash')
+    expect(out).toContain('export VOIGHT_KEY="vk_xyz"')
+    expect(out).toContain('export VOIGHT_PRIVACY="standard"')
+    expect(out).toContain('exec npx -y @voightxyz/sdk hook')
+  })
+})
+
+describe('parseCodexScriptEnv', () => {
+  it('round-trips with generateCodexHookScript', () => {
+    const parsed = parseCodexScriptEnv(
+      generateCodexHookScript('vk_round_trip', 'minimal'),
+    )
+    expect(parsed).toEqual({ key: 'vk_round_trip', privacy: 'minimal' })
+  })
+
+  it('returns undefined fields when the script has none', () => {
+    expect(parseCodexScriptEnv('echo hi')).toEqual({
+      key: undefined,
+      privacy: undefined,
+    })
+  })
+})
+
+describe('appendCodexConfigRegistration', () => {
+  const SOURCE_PATH = '/Users/test/.codex/plugins/voight-marketplace'
+
+  it('appends marketplace + plugin sections to a fresh config', () => {
+    const { content, changed } = appendCodexConfigRegistration(
+      '',
+      SOURCE_PATH,
+      '2026-05-14T20:00:00Z',
+    )
+    expect(changed).toBe(true)
+    expect(content).toContain('[marketplaces.voight]')
+    expect(content).toContain('source_type = "local"')
+    expect(content).toContain(`source = "${SOURCE_PATH}"`)
+    expect(content).toContain('[plugins."voight@voight"]')
+    expect(content).toContain('enabled = true')
+  })
+
+  it('preserves existing config when appending', () => {
+    const existing = 'model = "gpt-5.5"\nmodel_reasoning_effort = "medium"\n'
+    const { content, changed } = appendCodexConfigRegistration(
+      existing,
+      SOURCE_PATH,
+    )
+    expect(changed).toBe(true)
+    expect(content.startsWith(existing)).toBe(true)
+    expect(content).toContain('[marketplaces.voight]')
+  })
+
+  it('is idempotent when both sections already exist', () => {
+    const existing = `model = "gpt-5.5"
+
+[marketplaces.voight]
+last_updated = "2026-05-14T19:00:00Z"
+source_type = "local"
+source = "${SOURCE_PATH}"
+
+[plugins."voight@voight"]
+enabled = true
+`
+    const { content, changed } = appendCodexConfigRegistration(
+      existing,
+      SOURCE_PATH,
+    )
+    expect(changed).toBe(false)
+    expect(content).toBe(existing)
+  })
+
+  it('appends only the missing section when one exists already', () => {
+    const existing = `[marketplaces.voight]
+source_type = "local"
+source = "${SOURCE_PATH}"
+`
+    const { content, changed } = appendCodexConfigRegistration(
+      existing,
+      SOURCE_PATH,
+    )
+    expect(changed).toBe(true)
+    expect(content).toContain('[plugins."voight@voight"]')
+    // Marketplace section should not be duplicated.
+    expect(content.match(/\[marketplaces\.voight\]/g)).toHaveLength(1)
   })
 })
