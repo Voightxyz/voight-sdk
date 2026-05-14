@@ -18,6 +18,7 @@ import {
   generateCodexHookScript,
   generateCodexHooksJson,
   generateCodexMarketplaceManifest,
+  generateCodexPluginJson,
   generateCodexPluginManifest,
   generateCursorHookScript,
   parseArgs,
@@ -321,6 +322,28 @@ describe('generateCodexMarketplaceManifest', () => {
       name: 'voight',
       source: { source: 'local', path: './plugins/voight' },
     })
+  })
+
+  it('uses authentication=ON_INSTALL (Codex rejects NONE)', () => {
+    // Pre-0.6.3 we wrote 'NONE' here and Codex's plugin loader
+    // rejected the whole marketplace with "unknown variant `NONE`,
+    // expected `ON_INSTALL` or `ON_USE`". Regression guard.
+    const out = JSON.parse(generateCodexMarketplaceManifest())
+    expect(out.plugins[0].policy.authentication).toBe('ON_INSTALL')
+  })
+})
+
+describe('generateCodexPluginJson', () => {
+  it('emits a Codex-formatted plugin manifest with required fields', () => {
+    // Mirrors the structure used by /Users/<...>/cache/openai-bundled/
+    // browser/0.1.0-alpha2/.codex-plugin/plugin.json. Without this
+    // manifest Codex fails to install the plugin even after the
+    // marketplace is registered.
+    const out = JSON.parse(generateCodexPluginJson('0.6.3'))
+    expect(out.name).toBe('voight')
+    expect(out.version).toBe('0.6.3')
+    expect(out.interface.displayName).toBe('Voight')
+    expect(out.interface.category).toBe('Engineering')
   })
 })
 

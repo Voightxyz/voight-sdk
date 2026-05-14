@@ -435,11 +435,48 @@ export function generateCodexMarketplaceManifest(): string {
         },
         policy: {
           installation: 'AVAILABLE',
-          authentication: 'NONE',
+          // Codex's plugin loader only accepts ON_INSTALL or ON_USE
+          // here. 0.6.2 used 'NONE' which caused Codex to reject the
+          // entire marketplace ("unknown variant `NONE`") so the
+          // plugin never loaded.
+          authentication: 'ON_INSTALL',
         },
         category: 'Engineering',
       },
     ],
+  }
+  return JSON.stringify(body, null, 2) + '\n'
+}
+
+/**
+ * Codex's per-plugin manifest, distinct from our internal
+ * plugin.lock.json. Lives at <plugin>/.codex-plugin/plugin.json
+ * and is what Codex's plugin loader actually reads. Format
+ * extracted from /Users/locotoo/.codex/plugins/cache/openai-bundled/
+ * browser/0.1.0-alpha2/.codex-plugin/plugin.json.
+ */
+export function generateCodexPluginJson(version: string = '0.6.3'): string {
+  const body = {
+    name: CODEX_PLUGIN_NAME,
+    version,
+    description:
+      'Voight observability — captures every prompt, tool call, and decision Codex makes and streams them to voight.xyz/dashboard.',
+    author: {
+      name: 'Voight',
+    },
+    homepage: 'https://voight.xyz',
+    repository: 'https://github.com/Voightxyz/voight-sdk',
+    license: 'Apache-2.0',
+    keywords: ['observability', 'telemetry', 'agents'],
+    interface: {
+      displayName: 'Voight',
+      shortDescription: 'Real-time observability for Codex agents',
+      longDescription:
+        "Captures Codex's PreToolUse / PostToolUse / UserPromptSubmit / Stop / SubagentStop / PreCompact / PostCompact hook events and ships them to voight.xyz/dashboard for live timeline, anomaly detection, and cost attribution.",
+      developerName: 'Voight',
+      category: 'Engineering',
+      capabilities: ['Read'],
+    },
   }
   return JSON.stringify(body, null, 2) + '\n'
 }
@@ -653,6 +690,70 @@ function tryInstallSdkForCodex(pluginRoot: string): boolean {
   }
 }
 
+/**
+ * Find the `codex` CLI binary. Codex Desktop bundles it inside the
+ * .app on macOS; some installs also expose it on PATH. Returns the
+ * absolute path if found, undefined otherwise (callers degrade
+ * gracefully — setup still completes, user gets a warning).
+ */
+function findCodexCli(): string | undefined {
+  const candidates = [
+    '/Applications/Codex.app/Contents/Resources/codex',
+    '/usr/local/bin/codex',
+    join(homedir(), '.local', 'bin', 'codex'),
+  ]
+  for (const path of candidates) {
+    if (existsSync(path)) return path
+  }
+  // Try PATH lookup as last resort.
+  try {
+    const result = execSync('command -v codex', {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      encoding: 'utf-8',
+    })
+    const path = result.trim()
+    if (path && existsSync(path)) return path
+  } catch {
+    /* not on PATH */
+  }
+  return undefined
+}
+
+/**
+ * Path where Codex's plugin loader expects the installed plugin
+ * (NOT the marketplace source — that's a separate location).
+ */
+function codexPluginCachePath(): string {
+  return join(
+    codexHome(),
+    'plugins',
+    'cache',
+    CODEX_MARKETPLACE_NAME,
+    CODEX_PLUGIN_NAME,
+  )
+}
+
+/**
+ * Run `codex plugin marketplace add` so Codex validates the
+ * marketplace and copies the plugin into its cache. Returns true
+ * if the cache directory was populated, false otherwise.
+ */
+function installCodexPlugin(marketplaceRoot: string): boolean {
+  const codex = findCodexCli()
+  if (!codex) return false
+  try {
+    execSync(`"${codex}" plugin marketplace add "${marketplaceRoot}"`, {
+      stdio: 'pipe',
+      timeout: 30_000,
+    })
+  } catch {
+    // CLI failed — could be schema error, already-registered, etc.
+    // Don't fail setup; just check whether the cache got populated
+    // (sometimes Codex auto-installs on next launch).
+  }
+  return existsSync(codexPluginCachePath())
+}
+
 function writeCodexPlugin(
   key: string,
   privacy: PrivacyLevel,
@@ -660,20 +761,30 @@ function writeCodexPlugin(
   pluginRoot: string
   configChanged: boolean
   localInstallOk: boolean
+  cacheInstalled: boolean
 } {
   const root = codexMarketplaceRoot()
   const pluginRoot = codexPluginRoot()
   const scriptPath = codexPluginScriptPath()
 
-  // 1. Marketplace manifest
+  // 1. Marketplace manifest (fixed enum vs 0.6.2 — Codex only
+  // accepts ON_INSTALL / ON_USE for authentication).
   const mpPath = codexMarketplaceManifestPath()
   mkdirSync(dirname(mpPath), { recursive: true })
   writeFileSync(mpPath, generateCodexMarketplaceManifest(), 'utf-8')
 
-  // 2. Plugin manifest
+  // 2. Plugin manifests — TWO files now:
+  //   - plugin.lock.json: internal versioning marker
+  //   - .codex-plugin/plugin.json: the manifest Codex's plugin
+  //     loader actually reads. Without this, Codex fails to
+  //     install the plugin even after marketplace registration.
   const pluginPath = codexPluginManifestPath()
   mkdirSync(dirname(pluginPath), { recursive: true })
   writeFileSync(pluginPath, generateCodexPluginManifest(), 'utf-8')
+
+  const codexPluginJsonPath = join(pluginRoot, '.codex-plugin', 'plugin.json')
+  mkdirSync(dirname(codexPluginJsonPath), { recursive: true })
+  writeFileSync(codexPluginJsonPath, generateCodexPluginJson(), 'utf-8')
 
   // 3. hooks.json
   writeFileSync(codexPluginHooksPath(), generateCodexHooksJson(), 'utf-8')
@@ -718,7 +829,20 @@ function writeCodexPlugin(
     writeFileSync(configPath, content, 'utf-8')
   }
 
-  return { pluginRoot, configChanged: changed, localInstallOk }
+  // 7. Trigger Codex's plugin installer so the marketplace plugin
+  // gets copied to ~/.codex/plugins/cache/voight/voight/<version>/.
+  // Codex's hook loader reads from THAT cache path, not from the
+  // marketplace source. Without this step the plugin sits in the
+  // marketplace, registered but never installed, and hooks never
+  // fire.
+  const cacheInstalled = installCodexPlugin(root)
+
+  return {
+    pluginRoot,
+    configChanged: changed,
+    localInstallOk,
+    cacheInstalled,
+  }
 }
 
 // ─── End Codex adapter ───────────────────────────────────────────
@@ -1099,6 +1223,25 @@ export async function runSetup(argv: string[]): Promise<void> {
         "    may block inside its sandbox. Re-run setup once you've",
       )
       console.log('    restored npm registry access if hooks don\'t fire.')
+    }
+    if (!result.cacheInstalled) {
+      console.log('')
+      console.log('  ⚠ Codex did not install the plugin to its cache.')
+      console.log(
+        '    Codex looks for plugins under ~/.codex/plugins/cache/voight/',
+      )
+      console.log(
+        '    voight/ — the marketplace is registered but the plugin was',
+      )
+      console.log(
+        '    not copied there. Hooks WILL NOT fire until this is fixed.',
+      )
+      console.log('')
+      console.log('    Try manually:')
+      console.log(
+        '      codex plugin marketplace add ~/.codex/plugins/voight-marketplace',
+      )
+      console.log('    Then restart Codex.')
     }
   } else {
     // Claude Code.
