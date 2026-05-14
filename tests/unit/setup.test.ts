@@ -11,16 +11,20 @@
 import { describe, it, expect } from 'vitest'
 
 import {
+  detectTarget,
   frameworkName,
   parseArgs,
   parsePrivacyChoice,
 } from '../../src/setup.js'
 
 describe('parseArgs', () => {
-  it('returns empty key + claude target on empty argv', () => {
+  it('returns all fields undefined when nothing is specified', () => {
+    // Pre-0.4.3 this returned target: 'claude'. Now target stays
+    // undefined so runSetup can layer detectTarget() before
+    // falling back to the claude default.
     expect(parseArgs([])).toEqual({
       key: undefined,
-      target: 'claude',
+      target: undefined,
       privacy: undefined,
     })
   })
@@ -30,11 +34,12 @@ describe('parseArgs', () => {
     expect(parseArgs(['--key=vk_abc'])).toMatchObject({ key: 'vk_abc' })
   })
 
-  it('parses --target flag and ignores unknown targets', () => {
+  it('parses --target flag and drops unknown targets to undefined', () => {
     expect(parseArgs(['--target', 'cursor'])).toMatchObject({ target: 'cursor' })
     expect(parseArgs(['--target=codex'])).toMatchObject({ target: 'codex' })
-    // Unknown target stays on default
-    expect(parseArgs(['--target', 'vscode'])).toMatchObject({ target: 'claude' })
+    // Unknown target → undefined → runSetup falls back via
+    // detectTarget() and then to 'claude' as last resort.
+    expect(parseArgs(['--target', 'vscode'])).toMatchObject({ target: undefined })
   })
 
   it('parses --privacy flag (numeric and named values)', () => {
@@ -62,6 +67,64 @@ describe('parseArgs', () => {
       target: 'cursor',
       privacy: 'minimal',
     })
+  })
+})
+
+describe('detectTarget', () => {
+  it('returns undefined when no env signals are present', () => {
+    // No detection signals → caller falls back to the historical
+    // 'claude' default. Preserves pre-0.4.3 behaviour for users
+    // running setup from a plain terminal.
+    expect(detectTarget({})).toBeUndefined()
+  })
+
+  it('detects Cursor via CURSOR_TRACE_ID', () => {
+    expect(detectTarget({ CURSOR_TRACE_ID: 'abc-123' })).toBe('cursor')
+  })
+
+  it('detects Cursor via TERM_PROGRAM=cursor', () => {
+    expect(detectTarget({ TERM_PROGRAM: 'cursor' })).toBe('cursor')
+  })
+
+  it('does not match Cursor when TERM_PROGRAM is something else', () => {
+    // VS Code's integrated terminal sets TERM_PROGRAM=vscode; we
+    // must not misclassify that as Cursor.
+    expect(detectTarget({ TERM_PROGRAM: 'vscode' })).toBeUndefined()
+    expect(detectTarget({ TERM_PROGRAM: 'iTerm.app' })).toBeUndefined()
+  })
+
+  it('detects Claude Code via CLAUDECODE=1', () => {
+    expect(detectTarget({ CLAUDECODE: '1' })).toBe('claude')
+  })
+
+  it('detects Claude Code via CLAUDE_CODE_SSE_PORT', () => {
+    expect(detectTarget({ CLAUDE_CODE_SSE_PORT: '12345' })).toBe('claude')
+  })
+
+  it('detects Codex via CODEX_SESSION_ID', () => {
+    expect(detectTarget({ CODEX_SESSION_ID: 'sess_abc' })).toBe('codex')
+  })
+
+  it('Cursor wins over Claude when both signals are present', () => {
+    // The agent actually invoking the SDK is the more specific
+    // signal — if you're in Cursor's terminal but Claude Code was
+    // also running in the background, the npx call comes from
+    // Cursor.
+    expect(
+      detectTarget({ CURSOR_TRACE_ID: 'x', CLAUDECODE: '1' }),
+    ).toBe('cursor')
+  })
+
+  it('handles undefined env entries without crashing', () => {
+    // NodeJS.ProcessEnv values are `string | undefined`; an explicit
+    // `undefined` should never trigger a false positive.
+    expect(
+      detectTarget({
+        CURSOR_TRACE_ID: undefined,
+        CLAUDECODE: undefined,
+        TERM_PROGRAM: undefined,
+      }),
+    ).toBeUndefined()
   })
 })
 

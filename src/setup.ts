@@ -45,6 +45,39 @@ export function frameworkName(target: Target): string {
   }
 }
 
+/**
+ * Infer which coding agent is invoking the SDK from environment
+ * variables inherited from the parent process. Returns `undefined`
+ * when no strong signal is present; callers fall back to a default
+ * (today: `claude`) so the existing behaviour stays unchanged when
+ * detection can't be sure.
+ *
+ * Heuristics:
+ *   - `CURSOR_TRACE_ID`           → Cursor spawns agent processes
+ *                                   with this trace id in env.
+ *   - `TERM_PROGRAM === 'cursor'` → Cursor's integrated terminal
+ *                                   (overrides VS Code's default).
+ *   - `CLAUDECODE === '1'`        → Claude Code's documented marker.
+ *   - `CLAUDE_CODE_SSE_PORT`      → Claude Code SSE bridge port.
+ *   - `CODEX_SESSION_ID`          → speculative; refined when the
+ *                                   real Codex adapter ships.
+ *
+ * Order is most-specific-first: Cursor's signals win over Claude's
+ * when both are present (e.g. user has Claude Code session active
+ * but is currently in Cursor's terminal — the actual caller is
+ * Cursor).
+ */
+export function detectTarget(
+  env: NodeJS.ProcessEnv = process.env,
+): Target | undefined {
+  if (env.CURSOR_TRACE_ID) return 'cursor'
+  if (env.TERM_PROGRAM === 'cursor') return 'cursor'
+  if (env.CLAUDECODE === '1') return 'claude'
+  if (env.CLAUDE_CODE_SSE_PORT) return 'claude'
+  if (env.CODEX_SESSION_ID) return 'codex'
+  return undefined
+}
+
 const SETUP_DEFAULT_PRIVACY: PrivacyLevel = 'standard'
 
 const SUPPORTED_HOOKS = [
@@ -71,13 +104,24 @@ function targetSettingsPath(target: Target): string {
   }
 }
 
+/**
+ * Parse the CLI flags. Returns only the values the user explicitly
+ * provided — defaults are resolved by the caller (`runSetup`) so it
+ * can layer auto-detection (`detectTarget`) on top before falling
+ * back to the historical `claude` default.
+ *
+ * Note the `target` field: as of 0.4.3 it can be `undefined` when no
+ * `--target` flag was passed (so `runSetup` can call `detectTarget`
+ * first). Pre-0.4.3 this always returned `'claude'`; tests updated
+ * accordingly.
+ */
 export function parseArgs(argv: string[]): {
   key?: string
-  target: Target
+  target?: Target
   privacy?: PrivacyLevel
 } {
   let key: string | undefined
-  let target: Target = 'claude'
+  let target: Target | undefined
   let privacy: PrivacyLevel | undefined
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
@@ -316,11 +360,21 @@ async function askPrivacyLevel(
 }
 
 export async function runSetup(argv: string[]): Promise<void> {
-  const { key: keyArg, target, privacy: privacyArg } = parseArgs(argv)
+  const { key: keyArg, target: targetArg, privacy: privacyArg } = parseArgs(argv)
+
+  // Resolve target: explicit --target flag > env auto-detection >
+  // historical fallback to 'claude' (preserves pre-0.4.3 behaviour
+  // when neither flag nor signal is present).
+  const detected = detectTarget(process.env)
+  const target: Target = targetArg ?? detected ?? 'claude'
+  const isAutoDetected = !targetArg && detected !== undefined
+
   const settingsPath = targetSettingsPath(target)
 
   console.log('')
-  console.log(`  Voight · setup → ${target}`)
+  console.log(
+    `  Voight · setup → ${target}${isAutoDetected ? ' (auto-detected)' : ''}`,
+  )
   console.log(`  ${settingsPath}`)
   console.log('')
 
