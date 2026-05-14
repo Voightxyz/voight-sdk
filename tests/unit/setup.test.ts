@@ -365,16 +365,25 @@ describe('generateCodexHooksJson', () => {
 })
 
 describe('generateCodexHookScript', () => {
-  it('exports the env vars (including VOIGHT_SOURCE=codex) then execs into the hook handler', () => {
+  it('falls back to npx by default (when local install was not provided)', () => {
     const out = generateCodexHookScript('vk_xyz', 'standard')
-    expect(out).toContain('#!/usr/bin/env bash')
     expect(out).toContain('export VOIGHT_KEY="vk_xyz"')
     expect(out).toContain('export VOIGHT_PRIVACY="standard"')
-    // VOIGHT_SOURCE tells the hook handler this is a Codex event —
-    // Codex's PascalCase payloads otherwise look identical to Claude
-    // Code's, which would land the agent under claude-code:* prefix.
     expect(out).toContain('export VOIGHT_SOURCE="codex"')
     expect(out).toContain('exec npx -y @voightxyz/sdk hook')
+  })
+
+  it('resolves the SDK relative to the script when local install is available', () => {
+    // The path is computed from $BASH_SOURCE so the plugin folder
+    // is portable across machines — no /Users/<name>/ hardcoded.
+    const out = generateCodexHookScript('vk_xyz', 'standard', true)
+    expect(out).toContain('SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")"')
+    expect(out).toContain(
+      'exec node "$SCRIPT_DIR/../node_modules/@voightxyz/sdk/dist/cli.js" hook',
+    )
+    // Does NOT fall back to npx — sandbox-blocking path must not be
+    // present when local install succeeded.
+    expect(out).not.toContain('npx -y @voightxyz/sdk hook')
   })
 })
 
