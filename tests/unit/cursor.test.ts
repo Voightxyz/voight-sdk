@@ -181,7 +181,7 @@ describe('mapCursorEvent', () => {
     expect(mapCursorEvent({})).toBeNull()
   })
 
-  it('maps beforeSubmitPrompt to a decision with input.prompt', () => {
+  it('maps beforeSubmitPrompt to a decision with input.prompt + reasoning + outcome', () => {
     const evt: CursorEvent = {
       ...baseFields,
       hook_event_name: 'beforeSubmitPrompt',
@@ -192,6 +192,10 @@ describe('mapCursorEvent', () => {
     const mapped = mapCursorEvent(evt)
     expect(mapped).not.toBeNull()
     expect(mapped!.type).toBe('decision')
+    // reasoning carries the visible preview — matches Claude Code's
+    // UserPromptSubmit so the dashboard trace card renders consistently.
+    expect(mapped!.reasoning).toBe(evt.prompt)
+    expect(mapped!.outcome).toBe('success')
     expect(mapped!.input?.prompt).toBe(evt.prompt)
     expect(mapped!.model).toBe('claude-opus-4-7-thinking-xhigh')
     expect(mapped!.traceId).toBe(generationId)
@@ -201,7 +205,31 @@ describe('mapCursorEvent', () => {
       composerMode: 'agent',
       sessionId,
       cwd: '/Users/locotoo/Desktop/Cursor test',
+      promptSource: 'user',
+      prompt_length: evt.prompt!.length,
     })
+  })
+
+  it('truncates very long prompts to 800 chars + ellipsis on the preview', () => {
+    const long = 'x'.repeat(2000)
+    const evt: CursorEvent = {
+      ...baseFields,
+      hook_event_name: 'beforeSubmitPrompt',
+      prompt: long,
+    }
+    const mapped = mapCursorEvent(evt)
+    expect(mapped!.reasoning).toHaveLength(801) // 800 + ellipsis
+    expect(mapped!.metadata).toMatchObject({ prompt_length: 2000 })
+  })
+
+  it('falls back to a placeholder reasoning when the prompt is empty', () => {
+    const evt: CursorEvent = {
+      ...baseFields,
+      hook_event_name: 'beforeSubmitPrompt',
+      prompt: '',
+    }
+    const mapped = mapCursorEvent(evt)
+    expect(mapped!.reasoning).toBe('user prompt')
   })
 
   it('maps preToolUse to an action with outcome=pending', () => {

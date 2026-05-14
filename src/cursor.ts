@@ -143,6 +143,17 @@ function basename(p: string): string {
 }
 
 /**
+ * Truncate a string to N chars, appending an ellipsis when it
+ * actually had to be cut. Pure; mirrors the helper used in
+ * hook.ts for Claude Code's prompt previews so both adapters
+ * surface the same shape to the dashboard.
+ */
+function truncate(s: string, n: number): string {
+  if (s.length <= n) return s
+  return s.slice(0, n) + '…'
+}
+
+/**
  * Translate Cursor's token usage breakdown to Voight's. Cursor's
  * shape is identical to Anthropic's native API counters:
  *   input_tokens         — fresh / uncached input
@@ -273,12 +284,26 @@ export function mapCursorEvent(evt: CursorEvent): LogInput | null {
     }
 
     case 'beforeSubmitPrompt': {
+      // Match Claude Code's UserPromptSubmit shape so the dashboard's
+      // trace cards render the prompt preview consistently across
+      // adapters: reasoning carries the visible preview, input.prompt
+      // carries the full text (subject to privacy scrub), and the
+      // outcome marks the event as a completed user action.
+      const prompt = evt.prompt ?? ''
+      const preview = truncate(prompt, 800)
       return {
         type: 'decision',
-        input: { prompt: evt.prompt ?? '' },
+        reasoning: preview || 'user prompt',
+        outcome: 'success',
+        input: { prompt: preview },
         model: evt.model,
         traceId,
-        metadata: { ...baseMetadata, kind: 'user_prompt' },
+        metadata: {
+          ...baseMetadata,
+          kind: 'user_prompt',
+          promptSource: 'user',
+          prompt_length: prompt.length,
+        },
       }
     }
 
