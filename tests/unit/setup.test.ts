@@ -10,7 +10,11 @@
 
 import { describe, it, expect } from 'vitest'
 
-import { parseArgs, parsePrivacyChoice } from '../../src/setup.js'
+import {
+  frameworkName,
+  parseArgs,
+  parsePrivacyChoice,
+} from '../../src/setup.js'
 
 describe('parseArgs', () => {
   it('returns empty key + claude target on empty argv', () => {
@@ -95,5 +99,16 @@ describe('parsePrivacyChoice', () => {
     expect(parsePrivacyChoice('paranoid')).toBeNull()
     expect(parsePrivacyChoice('4')).toBeNull()
     expect(parsePrivacyChoice('-1')).toBeNull()
+  })
+})
+
+describe('frameworkName', () => {
+  it('returns the friendly display name for each target', () => {
+    // Used by the wizard's success message; before 0.4.3 the message
+    // hardcoded "Claude Code" regardless of target, which led Cursor's
+    // agent to misread Voight as Claude-only.
+    expect(frameworkName('claude')).toBe('Claude Code')
+    expect(frameworkName('cursor')).toBe('Cursor')
+    expect(frameworkName('codex')).toBe('Codex')
   })
 })

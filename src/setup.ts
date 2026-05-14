@@ -26,6 +26,25 @@ import { isPrivacyLevel, type PrivacyLevel } from './privacy.js'
 
 type Target = 'claude' | 'cursor' | 'codex'
 
+/**
+ * Friendly display name for a target. Used in user-facing wizard
+ * output so the success message says "Cursor" when the user is
+ * setting up Cursor, not the hardcoded "Claude Code" of v0.4.2.
+ *
+ * Keep in sync with the Target type union. Adding a new target
+ * requires a branch here; TypeScript exhaustiveness keeps that honest.
+ */
+export function frameworkName(target: Target): string {
+  switch (target) {
+    case 'claude':
+      return 'Claude Code'
+    case 'cursor':
+      return 'Cursor'
+    case 'codex':
+      return 'Codex'
+  }
+}
+
 const SETUP_DEFAULT_PRIVACY: PrivacyLevel = 'standard'
 
 const SUPPORTED_HOOKS = [
@@ -250,13 +269,17 @@ function printNonTtyApiKeyInstructions(privacy: PrivacyLevel): void {
  * Step 3 — final celebration. Used by both TTY and non-TTY flows
  * once setup completes.
  */
-function printDoneMessage(privacy: PrivacyLevel, addedHooks: number): void {
+function printDoneMessage(
+  privacy: PrivacyLevel,
+  addedHooks: number,
+  target: Target,
+): void {
   const hookWord = addedHooks === 1 ? 'hook' : 'hooks'
   console.log('')
   console.log("  🎉 You're all set!")
   console.log('')
   console.log(`    ✓ ${capitalize(privacy)} mode enabled`)
-  console.log(`    ✓ ${addedHooks} ${hookWord} wired into Claude Code`)
+  console.log(`    ✓ ${addedHooks} ${hookWord} wired into ${frameworkName(target)}`)
   console.log('    ✓ API key configured')
   console.log('')
   console.log('    → See your agent live: https://voight.xyz/dashboard')
@@ -375,7 +398,7 @@ export async function runSetup(argv: string[]): Promise<void> {
   }
   writeSettings(settingsPath, settings)
 
-  printDoneMessage(privacy, added)
+  printDoneMessage(privacy, added, target)
 }
 
 function capitalize(s: string): string {
