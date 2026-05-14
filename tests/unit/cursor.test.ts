@@ -44,10 +44,16 @@ describe('isCursorEvent', () => {
 })
 
 describe('cursorAgentIdentity', () => {
+  // Use a path that DEFINITELY doesn't exist on the test runner so
+  // we never accidentally hit a real marker file (the live SDK
+  // writes one of those to workspace roots after a successful
+  // first event, which would shadow the label-fallback path
+  // we're asserting on).
+  const TEST_WORKSPACE = '/tmp/voight-unit-test-cursor-workspace-DNE'
   const baseEvt: CursorEvent = {
     cursor_version: '3.4.17',
     session_id: '943adf19-875b-4223-bbe3-f3cd1393e97e',
-    workspace_roots: ['/Users/locotoo/Desktop/Cursor test'],
+    workspace_roots: [TEST_WORKSPACE],
   }
 
   it('honours VOIGHT_AGENT_ID env override above everything else', () => {
@@ -57,14 +63,14 @@ describe('cursorAgentIdentity', () => {
     expect(ident.agentId).toBe('my-bot.sol')
     // Marker path is still computed so the caller can persist the
     // server's CUID there on first write.
-    expect(ident.markerPath).toBe(
-      '/Users/locotoo/Desktop/Cursor test/.voight-agent-id',
-    )
+    expect(ident.markerPath).toBe(`${TEST_WORKSPACE}/.voight-agent-id`)
   })
 
   it('falls back to a workspace-derived label when no marker exists', () => {
     const ident = cursorAgentIdentity(baseEvt, {})
-    expect(ident.agentId).toBe('cursor:Cursor test')
+    expect(ident.agentId).toBe(
+      'cursor:voight-unit-test-cursor-workspace-DNE',
+    )
   })
 
   it('falls back to a session slice when there is no workspace root', () => {
@@ -335,9 +341,12 @@ describe('mapCursorEvent', () => {
     })
   })
 
-  it('lifts generation_id to traceId on every mapped event', () => {
+  it('lifts generation_id to traceId at top level AND in metadata', () => {
     // Cursor groups everything in one agent turn under a single
     // generation_id; the dashboard's per-trace grouping mirrors that.
+    // traceId must live in BOTH places: top-level (public LogInput
+    // field) and metadata.traceId (which runHook lifts to ship as
+    // a first-class column).
     const types: CursorEvent['hook_event_name'][] = [
       'beforeSubmitPrompt',
       'preToolUse',
@@ -354,6 +363,7 @@ describe('mapCursorEvent', () => {
       }
       const mapped = mapCursorEvent(evt)
       expect(mapped?.traceId).toBe(generationId)
+      expect(mapped?.metadata).toMatchObject({ traceId: generationId })
     }
   })
 })

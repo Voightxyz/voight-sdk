@@ -240,11 +240,17 @@ export function mapCursorEvent(evt: CursorEvent): LogInput | null {
   if (!name) return null
 
   const traceId = evt.generation_id || undefined
+  // traceId must live BOTH at top-level (public LogInput field for
+  // library callers) AND inside metadata (runHook lifts it from
+  // there to ship as a first-class column — matches Claude Code's
+  // mapEvent convention so the dashboard groups events consistently
+  // regardless of which adapter produced them).
   const baseMetadata: Record<string, unknown> = {
     hookEvent: name,
     cursorVersion: evt.cursor_version,
     sessionId: evt.session_id,
     conversationId: evt.conversation_id,
+    ...(traceId ? { traceId } : {}),
   }
   if (evt.workspace_roots && evt.workspace_roots.length > 0) {
     baseMetadata.cwd = evt.workspace_roots[0]
