@@ -22,7 +22,7 @@ Live timeline, privacy-first capture, anomaly alerts, and tamper-evident logs an
 npx -y @voightxyz/sdk setup
 ```
 
-The wizard auto-detects whether you're calling from Claude Code, Cursor, or Codex (via env signals like `CLAUDECODE`, `CURSOR_TRACE_ID`, etc.) and writes the right hook config in the right place. Pick a privacy level (Minimal · Standard ★ · Full), paste your API key, and every prompt, tool call, bash, and file edit your agent does streams to your dashboard. **No code changes.**
+The wizard auto-detects whether you're calling from Claude Code, Cursor, or Codex (via env signals: `CLAUDECODE` / `CURSOR_TRACE_ID` / `CODEX_THREAD_ID`) and writes the right hook config in the right place. Pick a privacy level (Minimal · Standard ★ · Full), paste your API key, and every prompt, tool call, bash, and file edit your agent does streams to your dashboard. **No code changes.**
 
 Generate your API key at [voight.xyz/dashboard](https://voight.xyz/dashboard).
 
@@ -139,11 +139,11 @@ The `setup` command writes hooks into different settings paths based on `--targe
 | --- | --- | --- |
 | `claude` | `~/.claude/settings.json` (env + hooks block) | ✅ Verified |
 | `cursor` | `~/.cursor/hooks.json` + `~/.cursor/hooks/voight.sh` wrapper | ✅ Verified (0.5.0) |
-| `codex` | `~/.codex/settings.json` | 🟡 Scaffolded, validation pending |
+| `codex` | `~/.codex/plugins/voight-marketplace/` (local marketplace + plugin) + `~/.codex/config.toml` registration | ✅ Verified (0.6.0) |
 
 Defaults to auto-detect — set explicitly with `--target=<name>` when the env signals are ambiguous (CI, generic terminals).
 
-Cursor's hooks schema has no env block, so the setup writes a small wrapper script (`~/.cursor/hooks/voight.sh`) that exports `VOIGHT_KEY` and `VOIGHT_PRIVACY` before invoking the hook handler. Other targets keep the env directly in their settings file.
+Cursor's hooks schema has no env block, so the setup writes a small wrapper script (`~/.cursor/hooks/voight.sh`) that exports `VOIGHT_KEY` and `VOIGHT_PRIVACY` before invoking the hook handler. Codex uses a similar wrapper inside a local marketplace plugin (no external repo required — registered via `source_type = "local"` in config.toml). Other targets keep the env directly in their settings file.
 
 Targets for Gemini, Replit Agent, and other coding-agent surfaces are on the roadmap.
 
@@ -197,7 +197,7 @@ The hook subprocess is short-lived (one per agent lifecycle event) and never thr
 | Wakeup/system-prompt classification | ✅ Shipped |
 | Permission-denial classification | ✅ Shipped (architectural caveats — see code comments) |
 | Cursor install target (11 hook events, auto-detect) | ✅ Shipped (0.5.0) |
-| Codex install target | 🟡 Scaffolded, validation pending |
+| Codex install target (local marketplace plugin, 7 hook events, auto-detect) | ✅ Shipped (0.6.0) |
 | `voight.check()` / `voight.enforce()` (HITL) | 🟡 No-op today, v1.0 |
 | Solana hash anchoring of events | 🟡 v1.0 |
 | Framework Skills (`@voightxyz/eliza-skill`, etc.) | 🔴 Roadmap, separate packages |
@@ -208,7 +208,7 @@ The hook subprocess is short-lived (one per agent lifecycle event) and never thr
 
 ```bash
 npm install
-npm test         # Vitest — currently 194 tests
+npm test         # Vitest — currently 211 tests
 npm run type-check
 npm run build    # tsup — produces ESM + CJS + .d.ts in dist/
 ```
