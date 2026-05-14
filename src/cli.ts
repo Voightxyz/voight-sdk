@@ -18,12 +18,12 @@ const HELP = `
 voight — observability for AI agents on Solana
 
 Usage:
-  npx -y @voightxyz/sdk setup           Wire Voight into Claude Code
-  npx -y @voightxyz/sdk hook            Hook handler (used by Claude Code)
+  npx -y @voightxyz/sdk setup           Wire Voight into your coding agent
+  npx -y @voightxyz/sdk hook            Hook handler (invoked by the agent)
 
 Options:
   --key <vk_...>                        Pass your Voight API key non-interactively
-  --target claude|cursor|codex          Editor to wire up (default: claude)
+  --target claude|cursor|codex          Editor to wire up (auto-detected by default)
   --help, -h                            Show this message
 
 Need a key? Generate one at https://voight.xyz/dashboard

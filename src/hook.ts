@@ -62,6 +62,12 @@ import {
 import { gcGitDir, getGitContextCached } from './git.js'
 import { detectDenial } from './denials.js'
 import { applyPrivacy, resolvePrivacyLevel } from './privacy.js'
+import {
+  cursorAgentIdentity,
+  isCursorEvent,
+  mapCursorEvent,
+  type CursorEvent,
+} from './cursor.js'
 
 type HookEvent = {
   hook_event_name?: string
@@ -889,47 +895,72 @@ export async function runHook(): Promise<void> {
     return
   }
 
-  // Stable agent identity. Resolution order:
-  //   1. VOIGHT_AGENT_ID env override (explicit, highest priority)
-  //   2. .voight-agent-id marker file in cwd (CUID written by server
-  //      after first event — survives folder rename, agent rename,
-  //      anything)
-  //   3. claude-code:<cwd basename> (legacy first-time label; server
-  //      will return its CUID and we'll write it to the marker for
-  //      future events)
-  //   4. claude-code:<session_id slice> when there's no cwd at all
-  //   5. 'claude-code:unknown' (true last resort)
-  const markerPath = evt.cwd ? join(evt.cwd, '.voight-agent-id') : null
-  let markerCuid: string | null = null
-  if (markerPath && existsSync(markerPath)) {
-    try {
-      const raw = readFileSync(markerPath, 'utf8').trim()
-      if (raw) markerCuid = raw
-    } catch {
-      /* unreadable marker — ignore, fall through to legacy label */
-    }
-  }
-  const agentId =
-    process.env.VOIGHT_AGENT_ID ||
-    markerCuid ||
-    (evt.cwd ? `claude-code:${pathBasename(evt.cwd)}` : null) ||
-    (evt.session_id ? `claude-code:${evt.session_id.slice(0, 8)}` : null) ||
-    'claude-code:unknown'
-
+  // Discriminate which agent invoked us so we can pick the correct
+  // mapper + identity convention. Cursor events carry `cursor_version`;
+  // Claude Code's never do.
+  const isCursor = isCursorEvent(evt as unknown as Record<string, unknown>)
   const endpoint =
     process.env.VOIGHT_ENDPOINT ||
     process.env.NEXT_PUBLIC_VOIGHT_API ||
     undefined
+
+  // Stable agent identity. Each agent stack has its own convention
+  // (see resolvers below). Both share the marker-file pattern: the
+  // server's CUID gets persisted to .voight-agent-id so subsequent
+  // events match by primary key (rename-proof, folder-move-proof).
+  let agentId: string
+  let markerPath: string | null = null
+
+  if (isCursor) {
+    const ident = cursorAgentIdentity(evt as unknown as CursorEvent)
+    agentId = ident.agentId
+    markerPath = ident.markerPath
+    if (markerPath && existsSync(markerPath)) {
+      try {
+        const cuid = readFileSync(markerPath, 'utf8').trim()
+        if (cuid) agentId = cuid
+      } catch {
+        /* unreadable — keep label fallback */
+      }
+    }
+  } else {
+    // Claude Code legacy path — unchanged from pre-0.4.3.
+    markerPath = evt.cwd ? join(evt.cwd, '.voight-agent-id') : null
+    let markerCuid: string | null = null
+    if (markerPath && existsSync(markerPath)) {
+      try {
+        const raw = readFileSync(markerPath, 'utf8').trim()
+        if (raw) markerCuid = raw
+      } catch {
+        /* unreadable marker — ignore, fall through to legacy label */
+      }
+    }
+    agentId =
+      process.env.VOIGHT_AGENT_ID ||
+      markerCuid ||
+      (evt.cwd ? `claude-code:${pathBasename(evt.cwd)}` : null) ||
+      (evt.session_id ? `claude-code:${evt.session_id.slice(0, 8)}` : null) ||
+      'claude-code:unknown'
+  }
 
   const voight = new Voight({
     agentId,
     apiKey,
     endpoint,
     swallowErrors: true,
-    defaults: { tool: 'claude-code' },
+    defaults: { tool: isCursor ? 'cursor' : 'claude-code' },
   })
 
-  const mapped = mapEvent(evt)
+  const mapped = isCursor
+    ? mapCursorEvent(evt as unknown as CursorEvent)
+    : mapEvent(evt)
+
+  // Cursor's sessionStart for background agents returns null — skip
+  // shipping in that case to keep the dashboard timeline clean.
+  if (!mapped) {
+    dbg('mapper returned null — skipping event')
+    return
+  }
 
   // Apply the user's privacy choice BEFORE the network round-trip.
   // Under 'minimal' the payload is reduced to metadata-only (tool
