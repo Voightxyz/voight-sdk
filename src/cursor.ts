@@ -34,7 +34,12 @@ export type CursorEventName =
   | 'beforeSubmitPrompt'
   | 'preToolUse'
   | 'postToolUse'
+  | 'postToolUseFailure'
   | 'afterAgentResponse'
+  | 'afterAgentThought'
+  | 'subagentStart'
+  | 'subagentStop'
+  | 'preCompact'
   | 'stop'
 
 /**
@@ -79,6 +84,18 @@ export type CursorEvent = {
   output_tokens?: number
   cache_read_tokens?: number
   cache_write_tokens?: number
+
+  // afterAgentThought — best-effort field names until probe captures one.
+  thought?: string
+
+  // subagentStart / subagentStop — best-effort until probe captures one.
+  subagent_type?: string
+  subagent_input?: Record<string, unknown>
+  subagent_output?: unknown
+  parent_session_id?: string
+
+  // preCompact — best-effort. Cursor may surface token thresholds.
+  trigger?: string
 }
 
 /**
@@ -375,6 +392,106 @@ export function mapCursorEvent(evt: CursorEvent): LogInput | null {
           status: evt.status,
           loopCount: evt.loop_count,
           tokensBreakdown: tokens?.breakdown,
+        },
+      }
+    }
+
+    case 'postToolUseFailure': {
+      // Cursor surfaces explicit tool failures via this dedicated
+      // event in addition to (potentially redundantly with)
+      // postToolUse outcome=failed. We capture both so the
+      // dashboard's error timeline catches every failure regardless
+      // of which path Cursor takes for a given tool.
+      const result = parseCursorToolOutput(evt.tool_output)
+      return {
+        type: 'action',
+        toolExecuted: evt.tool_name,
+        outcome: 'failed',
+        errorMessage:
+          result.errorMessage ?? evt.tool_output ?? 'tool execution failed',
+        durationMs:
+          typeof evt.duration === 'number' ? evt.duration : undefined,
+        model: evt.model,
+        traceId,
+        metadata: {
+          ...baseMetadata,
+          kind: 'post_tool_use_failure',
+          toolUseId: evt.tool_use_id,
+          toolInput: evt.tool_input,
+        },
+      }
+    }
+
+    case 'subagentStart': {
+      return {
+        type: 'decision',
+        reasoning: `Subagent started${evt.subagent_type ? ` (${evt.subagent_type})` : ''}`,
+        outcome: 'success',
+        model: evt.model,
+        traceId,
+        metadata: {
+          ...baseMetadata,
+          kind: 'subagent_start',
+          subagentType: evt.subagent_type,
+          subagentInput: evt.subagent_input,
+          parentSessionId: evt.parent_session_id,
+        },
+      }
+    }
+
+    case 'subagentStop': {
+      const tokens = cursorTokens(evt)
+      return {
+        type: 'decision',
+        reasoning: `Subagent finished${evt.subagent_type ? ` (${evt.subagent_type})` : ''}`,
+        outcome: evt.status === 'aborted' ? 'failed' : 'success',
+        durationMs:
+          typeof evt.duration === 'number' ? evt.duration : undefined,
+        model: evt.model,
+        traceId,
+        tokens: tokens?.tokens,
+        metadata: {
+          ...baseMetadata,
+          kind: 'subagent_stop',
+          subagentType: evt.subagent_type,
+          subagentOutput: evt.subagent_output,
+          status: evt.status,
+          parentSessionId: evt.parent_session_id,
+          tokensBreakdown: tokens?.breakdown,
+        },
+      }
+    }
+
+    case 'preCompact': {
+      return {
+        type: 'decision',
+        reasoning: 'Context compaction triggered',
+        outcome: 'success',
+        model: evt.model,
+        traceId,
+        metadata: {
+          ...baseMetadata,
+          kind: 'pre_compact',
+          trigger: evt.trigger,
+        },
+      }
+    }
+
+    case 'afterAgentThought': {
+      // Cursor's analogue of Claude Code's thinking blocks. Preview
+      // is truncated to keep dashboard rows scannable; the full
+      // text is preserved via the privacy filter's content rules.
+      const text = evt.thought ?? evt.text ?? ''
+      const preview = truncate(text, 800)
+      return {
+        type: 'decision',
+        reasoning: preview || 'agent thought',
+        model: evt.model,
+        traceId,
+        metadata: {
+          ...baseMetadata,
+          kind: 'agent_thought',
+          thought_length: text.length,
         },
       }
     }

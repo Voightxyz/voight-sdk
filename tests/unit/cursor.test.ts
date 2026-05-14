@@ -369,6 +369,121 @@ describe('mapCursorEvent', () => {
     })
   })
 
+  it('maps postToolUseFailure to action with outcome=failed', () => {
+    const evt: CursorEvent = {
+      ...baseFields,
+      hook_event_name: 'postToolUseFailure',
+      tool_name: 'Shell',
+      tool_output: JSON.stringify({ output: 'EACCES\n', exitCode: 1 }),
+      tool_use_id: 'tool_abc',
+      duration: 42,
+    }
+    const mapped = mapCursorEvent(evt)
+    expect(mapped!.type).toBe('action')
+    expect(mapped!.outcome).toBe('failed')
+    expect(mapped!.errorMessage).toContain('EACCES')
+    expect(mapped!.durationMs).toBe(42)
+    expect(mapped!.metadata).toMatchObject({
+      kind: 'post_tool_use_failure',
+      toolUseId: 'tool_abc',
+    })
+  })
+
+  it('maps subagentStart to decision with subagent metadata', () => {
+    const evt: CursorEvent = {
+      ...baseFields,
+      hook_event_name: 'subagentStart',
+      subagent_type: 'generalPurpose',
+      subagent_input: { task: 'find bugs' },
+      parent_session_id: 'parent-sess',
+    }
+    const mapped = mapCursorEvent(evt)
+    expect(mapped!.type).toBe('decision')
+    expect(mapped!.reasoning).toContain('generalPurpose')
+    expect(mapped!.outcome).toBe('success')
+    expect(mapped!.metadata).toMatchObject({
+      kind: 'subagent_start',
+      subagentType: 'generalPurpose',
+      subagentInput: { task: 'find bugs' },
+      parentSessionId: 'parent-sess',
+    })
+  })
+
+  it('maps subagentStop completed → outcome=success with tokens', () => {
+    const evt: CursorEvent = {
+      ...baseFields,
+      hook_event_name: 'subagentStop',
+      subagent_type: 'shell',
+      status: 'completed',
+      input_tokens: 100,
+      output_tokens: 50,
+      cache_read_tokens: 200,
+      cache_write_tokens: 0,
+      duration: 1234.5,
+    }
+    const mapped = mapCursorEvent(evt)
+    expect(mapped!.outcome).toBe('success')
+    expect(mapped!.durationMs).toBeCloseTo(1234.5)
+    expect(mapped!.tokens?.output).toBe(50)
+    expect(mapped!.metadata).toMatchObject({
+      kind: 'subagent_stop',
+      subagentType: 'shell',
+      status: 'completed',
+    })
+  })
+
+  it('maps subagentStop aborted → outcome=failed', () => {
+    const evt: CursorEvent = {
+      ...baseFields,
+      hook_event_name: 'subagentStop',
+      status: 'aborted',
+    }
+    expect(mapCursorEvent(evt)!.outcome).toBe('failed')
+  })
+
+  it('maps preCompact to decision with kind=pre_compact', () => {
+    const evt: CursorEvent = {
+      ...baseFields,
+      hook_event_name: 'preCompact',
+      trigger: 'auto',
+    }
+    const mapped = mapCursorEvent(evt)
+    expect(mapped!.type).toBe('decision')
+    expect(mapped!.reasoning).toBe('Context compaction triggered')
+    expect(mapped!.outcome).toBe('success')
+    expect(mapped!.metadata).toMatchObject({
+      kind: 'pre_compact',
+      trigger: 'auto',
+    })
+  })
+
+  it('maps afterAgentThought to decision capturing the thought as reasoning', () => {
+    const evt: CursorEvent = {
+      ...baseFields,
+      hook_event_name: 'afterAgentThought',
+      thought: 'I should refactor this function before adding the test.',
+    }
+    const mapped = mapCursorEvent(evt)
+    expect(mapped!.type).toBe('decision')
+    expect(mapped!.reasoning).toBe(evt.thought)
+    expect(mapped!.metadata).toMatchObject({
+      kind: 'agent_thought',
+      thought_length: evt.thought!.length,
+    })
+  })
+
+  it('falls back to text field when afterAgentThought uses text instead of thought', () => {
+    // Until we have probe data confirming the exact field name, the
+    // mapper accepts either 'thought' or 'text' so we capture the
+    // content regardless of which Cursor sends.
+    const evt: CursorEvent = {
+      ...baseFields,
+      hook_event_name: 'afterAgentThought',
+      text: 'fallback content',
+    }
+    expect(mapCursorEvent(evt)!.reasoning).toBe('fallback content')
+  })
+
   it('lifts generation_id to traceId at top level AND in metadata', () => {
     // Cursor groups everything in one agent turn under a single
     // generation_id; the dashboard's per-trace grouping mirrors that.

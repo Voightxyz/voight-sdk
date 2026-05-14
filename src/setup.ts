@@ -127,12 +127,20 @@ function targetSettingsPath(target: Target): string {
 // own documentation skill, version 3.4+).
 
 const CURSOR_HOOK_EVENTS = [
+  // Core agent lifecycle (validated via probe of Cursor 3.4.17).
   'preToolUse',
   'postToolUse',
   'beforeSubmitPrompt',
   'stop',
   'afterAgentResponse',
   'sessionStart',
+  // Extended coverage — added 2026-05-14. Payload shapes inferred
+  // from create-hook SKILL.md; refined when probe data arrives.
+  'postToolUseFailure',
+  'subagentStart',
+  'subagentStop',
+  'preCompact',
+  'afterAgentThought',
 ] as const
 type CursorHookEvent = (typeof CURSOR_HOOK_EVENTS)[number]
 
