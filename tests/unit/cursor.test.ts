@@ -17,6 +17,7 @@ import {
   cursorTokens,
   isCursorEvent,
   mapCursorEvent,
+  normaliseCursorModel,
   parseCursorToolOutput,
   type CursorEvent,
 } from '../../src/cursor.js'
@@ -88,6 +89,28 @@ describe('cursorAgentIdentity', () => {
       {},
     )
     expect(ident.agentId).toBe('cursor:unknown')
+  })
+})
+
+describe('normaliseCursorModel', () => {
+  it('relabels "default" as "cursor-auto" so the dashboard renders honestly', () => {
+    expect(normaliseCursorModel('default')).toBe('cursor-auto')
+  })
+
+  it('relabels "auto" as "cursor-auto" too (Cursor sometimes uses this form)', () => {
+    expect(normaliseCursorModel('auto')).toBe('cursor-auto')
+  })
+
+  it('passes concrete model names through unchanged', () => {
+    expect(normaliseCursorModel('claude-opus-4-7-thinking-xhigh')).toBe(
+      'claude-opus-4-7-thinking-xhigh',
+    )
+    expect(normaliseCursorModel('gpt-4o-2024-08-06')).toBe('gpt-4o-2024-08-06')
+  })
+
+  it('passes undefined / empty through unchanged', () => {
+    expect(normaliseCursorModel(undefined)).toBeUndefined()
+    expect(normaliseCursorModel('')).toBe('')
   })
 })
 
@@ -295,6 +318,10 @@ describe('mapCursorEvent', () => {
     }
     const mapped = mapCursorEvent(evt)
     expect(mapped!.type).toBe('decision')
+    // Cursor reports model="default" in Auto mode — the mapper
+    // relabels to "cursor-auto" so the dashboard renders something
+    // meaningful and pricing has a known entry to match.
+    expect(mapped!.model).toBe('cursor-auto')
     expect(mapped!.reasoning).toBe("Here's what was changed.")
     expect(mapped!.tokens).toEqual({
       input: 81310 + 77312,

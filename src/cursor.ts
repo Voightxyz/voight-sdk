@@ -160,6 +160,28 @@ function basename(p: string): string {
 }
 
 /**
+ * Normalise Cursor's `model` field for the dashboard.
+ *
+ * When the user is on Cursor Auto, Cursor routes the query to one
+ * of several underlying models and reports `model: "default"` for
+ * every event — its own SQLite tracking db has the same string, so
+ * there's no way to recover the real model name post-hoc.
+ *
+ * Rather than send a meaningless `"default"` (which the backend
+ * silently falls back to Sonnet 4.5 pricing for), we relabel to
+ * `"cursor-auto"` so the dashboard renders something honest and the
+ * pricing table can carry an explicit (estimated) entry for it.
+ *
+ * Concrete model names that Cursor reports (e.g.
+ * `"claude-opus-4-7-thinking-xhigh"`) are passed through unchanged.
+ */
+export function normaliseCursorModel(model: string | undefined): string | undefined {
+  if (!model) return model
+  if (model === 'default' || model === 'auto') return 'cursor-auto'
+  return model
+}
+
+/**
  * Truncate a string to N chars, appending an ellipsis when it
  * actually had to be cut. Pure; mirrors the helper used in
  * hook.ts for Claude Code's prompt previews so both adapters
@@ -294,7 +316,7 @@ export function mapCursorEvent(evt: CursorEvent): LogInput | null {
       return {
         type: 'decision',
         reasoning: 'Cursor session started',
-        model: evt.model,
+        model: normaliseCursorModel(evt.model),
         traceId,
         metadata: { ...baseMetadata, kind: 'session_start' },
       }
@@ -313,7 +335,7 @@ export function mapCursorEvent(evt: CursorEvent): LogInput | null {
         reasoning: preview || 'user prompt',
         outcome: 'success',
         input: { prompt: preview },
-        model: evt.model,
+        model: normaliseCursorModel(evt.model),
         traceId,
         metadata: {
           ...baseMetadata,
@@ -329,7 +351,7 @@ export function mapCursorEvent(evt: CursorEvent): LogInput | null {
         type: 'action',
         toolExecuted: evt.tool_name,
         outcome: 'pending',
-        model: evt.model,
+        model: normaliseCursorModel(evt.model),
         traceId,
         metadata: {
           ...baseMetadata,
@@ -349,7 +371,7 @@ export function mapCursorEvent(evt: CursorEvent): LogInput | null {
         errorMessage: result.errorMessage,
         durationMs:
           typeof evt.duration === 'number' ? evt.duration : undefined,
-        model: evt.model,
+        model: normaliseCursorModel(evt.model),
         traceId,
         metadata: {
           ...baseMetadata,
@@ -365,7 +387,7 @@ export function mapCursorEvent(evt: CursorEvent): LogInput | null {
       return {
         type: 'decision',
         reasoning: evt.text,
-        model: evt.model,
+        model: normaliseCursorModel(evt.model),
         traceId,
         tokens: tokens?.tokens,
         metadata: {
@@ -383,7 +405,7 @@ export function mapCursorEvent(evt: CursorEvent): LogInput | null {
         type: 'decision',
         reasoning: isAborted ? 'Cursor turn aborted' : 'Cursor turn completed',
         outcome: isAborted ? 'failed' : 'success',
-        model: evt.model,
+        model: normaliseCursorModel(evt.model),
         traceId,
         tokens: tokens?.tokens,
         metadata: {
@@ -411,7 +433,7 @@ export function mapCursorEvent(evt: CursorEvent): LogInput | null {
           result.errorMessage ?? evt.tool_output ?? 'tool execution failed',
         durationMs:
           typeof evt.duration === 'number' ? evt.duration : undefined,
-        model: evt.model,
+        model: normaliseCursorModel(evt.model),
         traceId,
         metadata: {
           ...baseMetadata,
@@ -427,7 +449,7 @@ export function mapCursorEvent(evt: CursorEvent): LogInput | null {
         type: 'decision',
         reasoning: `Subagent started${evt.subagent_type ? ` (${evt.subagent_type})` : ''}`,
         outcome: 'success',
-        model: evt.model,
+        model: normaliseCursorModel(evt.model),
         traceId,
         metadata: {
           ...baseMetadata,
@@ -447,7 +469,7 @@ export function mapCursorEvent(evt: CursorEvent): LogInput | null {
         outcome: evt.status === 'aborted' ? 'failed' : 'success',
         durationMs:
           typeof evt.duration === 'number' ? evt.duration : undefined,
-        model: evt.model,
+        model: normaliseCursorModel(evt.model),
         traceId,
         tokens: tokens?.tokens,
         metadata: {
@@ -467,7 +489,7 @@ export function mapCursorEvent(evt: CursorEvent): LogInput | null {
         type: 'decision',
         reasoning: 'Context compaction triggered',
         outcome: 'success',
-        model: evt.model,
+        model: normaliseCursorModel(evt.model),
         traceId,
         metadata: {
           ...baseMetadata,
@@ -486,7 +508,7 @@ export function mapCursorEvent(evt: CursorEvent): LogInput | null {
       return {
         type: 'decision',
         reasoning: preview || 'agent thought',
-        model: evt.model,
+        model: normaliseCursorModel(evt.model),
         traceId,
         metadata: {
           ...baseMetadata,
