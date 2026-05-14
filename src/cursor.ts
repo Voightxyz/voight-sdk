@@ -383,16 +383,26 @@ export function mapCursorEvent(evt: CursorEvent): LogInput | null {
     }
 
     case 'afterAgentResponse': {
+      // Match Claude Code's Stop-event shape: the response text
+      // lives in metadata.responseText (which the dashboard renders
+      // as a maskable block with an eye toggle), NOT in reasoning.
+      // Reasoning is a short marker so the trace timeline reads
+      // "Agent response · click for details" instead of leaking the
+      // full text inline. Privacy + visual parity with Claude in one
+      // change.
       const tokens = cursorTokens(evt)
+      const text = evt.text ?? ''
       return {
         type: 'decision',
-        reasoning: evt.text,
+        reasoning: 'agent response captured',
+        outcome: 'success',
         model: normaliseCursorModel(evt.model),
         traceId,
         tokens: tokens?.tokens,
         metadata: {
           ...baseMetadata,
           kind: 'agent_response',
+          ...(text ? { responseText: text } : {}),
           tokensBreakdown: tokens?.breakdown,
         },
       }
@@ -500,19 +510,22 @@ export function mapCursorEvent(evt: CursorEvent): LogInput | null {
     }
 
     case 'afterAgentThought': {
-      // Cursor's analogue of Claude Code's thinking blocks. Preview
-      // is truncated to keep dashboard rows scannable; the full
-      // text is preserved via the privacy filter's content rules.
+      // Cursor's analogue of Claude Code's thinking blocks. Stored
+      // in metadata.thinkingPreview (which the dashboard renders as
+      // a maskable block, same as Claude). reasoning is a short
+      // marker so the timeline doesn't leak the chain-of-thought
+      // inline.
       const text = evt.thought ?? evt.text ?? ''
-      const preview = truncate(text, 800)
       return {
         type: 'decision',
-        reasoning: preview || 'agent thought',
+        reasoning: 'agent thought captured',
+        outcome: 'success',
         model: normaliseCursorModel(evt.model),
         traceId,
         metadata: {
           ...baseMetadata,
           kind: 'agent_thought',
+          ...(text ? { thinkingPreview: text } : {}),
           thought_length: text.length,
         },
       }

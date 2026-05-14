@@ -305,7 +305,7 @@ describe('mapCursorEvent', () => {
     expect(mapped!.errorMessage).toContain('EPERM')
   })
 
-  it('maps afterAgentResponse with full token breakdown + text', () => {
+  it('maps afterAgentResponse — text in metadata.responseText (maskable), reasoning is a marker', () => {
     const evt: CursorEvent = {
       ...baseFields,
       hook_event_name: 'afterAgentResponse',
@@ -322,7 +322,15 @@ describe('mapCursorEvent', () => {
     // relabels to "cursor-auto" so the dashboard renders something
     // meaningful and pricing has a known entry to match.
     expect(mapped!.model).toBe('cursor-auto')
-    expect(mapped!.reasoning).toBe("Here's what was changed.")
+    // The actual response text MUST NOT live in reasoning (that
+    // leaks it inline in the timeline). Lives in metadata.responseText
+    // which the dashboard renders via the same maskable block used
+    // for Claude Code's Stop responses.
+    expect(mapped!.reasoning).toBe('agent response captured')
+    expect((mapped!.metadata as Record<string, unknown>).responseText).toBe(
+      "Here's what was changed.",
+    )
+    expect(mapped!.outcome).toBe('success')
     expect(mapped!.tokens).toEqual({
       input: 81310 + 77312,
       output: 1478,
@@ -484,7 +492,7 @@ describe('mapCursorEvent', () => {
     })
   })
 
-  it('maps afterAgentThought to decision capturing the thought as reasoning', () => {
+  it('maps afterAgentThought — thought in metadata.thinkingPreview (maskable), reasoning is a marker', () => {
     const evt: CursorEvent = {
       ...baseFields,
       hook_event_name: 'afterAgentThought',
@@ -492,7 +500,11 @@ describe('mapCursorEvent', () => {
     }
     const mapped = mapCursorEvent(evt)
     expect(mapped!.type).toBe('decision')
-    expect(mapped!.reasoning).toBe(evt.thought)
+    expect(mapped!.reasoning).toBe('agent thought captured')
+    expect(
+      (mapped!.metadata as Record<string, unknown>).thinkingPreview,
+    ).toBe(evt.thought)
+    expect(mapped!.outcome).toBe('success')
     expect(mapped!.metadata).toMatchObject({
       kind: 'agent_thought',
       thought_length: evt.thought!.length,
@@ -508,7 +520,10 @@ describe('mapCursorEvent', () => {
       hook_event_name: 'afterAgentThought',
       text: 'fallback content',
     }
-    expect(mapCursorEvent(evt)!.reasoning).toBe('fallback content')
+    const mapped = mapCursorEvent(evt)
+    expect(
+      (mapped!.metadata as Record<string, unknown>).thinkingPreview,
+    ).toBe('fallback content')
   })
 
   it('lifts generation_id to traceId at top level AND in metadata', () => {
