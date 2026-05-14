@@ -152,11 +152,12 @@ describe('detectTarget', () => {
 })
 
 describe('generateCursorHookScript', () => {
-  it('writes a bash wrapper exporting key + privacy then exec-ing the hook', () => {
+  it('writes a bash wrapper exporting key + privacy + source then exec-ing the hook', () => {
     const out = generateCursorHookScript('vk_abc123', 'standard')
     expect(out).toContain('#!/usr/bin/env bash')
     expect(out).toContain('export VOIGHT_KEY="vk_abc123"')
     expect(out).toContain('export VOIGHT_PRIVACY="standard"')
+    expect(out).toContain('export VOIGHT_SOURCE="cursor"')
     expect(out).toContain('exec npx -y @voightxyz/sdk hook')
   })
 
@@ -364,11 +365,15 @@ describe('generateCodexHooksJson', () => {
 })
 
 describe('generateCodexHookScript', () => {
-  it('exports the env vars then execs into the npx hook handler', () => {
+  it('exports the env vars (including VOIGHT_SOURCE=codex) then execs into the hook handler', () => {
     const out = generateCodexHookScript('vk_xyz', 'standard')
     expect(out).toContain('#!/usr/bin/env bash')
     expect(out).toContain('export VOIGHT_KEY="vk_xyz"')
     expect(out).toContain('export VOIGHT_PRIVACY="standard"')
+    // VOIGHT_SOURCE tells the hook handler this is a Codex event —
+    // Codex's PascalCase payloads otherwise look identical to Claude
+    // Code's, which would land the agent under claude-code:* prefix.
+    expect(out).toContain('export VOIGHT_SOURCE="codex"')
     expect(out).toContain('exec npx -y @voightxyz/sdk hook')
   })
 })

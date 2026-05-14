@@ -896,9 +896,25 @@ export async function runHook(): Promise<void> {
   }
 
   // Discriminate which agent invoked us so we can pick the correct
-  // mapper + identity convention. Cursor events carry `cursor_version`;
-  // Claude Code's never do.
+  // mapper + identity convention.
+  //
+  // Two signals (in priority order):
+  //   1. stdin payload has `cursor_version` → Cursor
+  //      (Cursor's events carry a unique field, easy to detect.)
+  //   2. VOIGHT_SOURCE env var → set explicitly by the wrapper
+  //      script for Codex / Cursor. Required for Codex because its
+  //      events use the same PascalCase shape as Claude Code, with
+  //      no distinguishing field in the payload.
+  //   3. Fall back to Claude Code (the original target).
   const isCursor = isCursorEvent(evt as unknown as Record<string, unknown>)
+  const voightSource = process.env.VOIGHT_SOURCE
+  const isCodex = !isCursor && voightSource === 'codex'
+  const frameworkPrefix: 'cursor' | 'codex' | 'claude-code' = isCursor
+    ? 'cursor'
+    : isCodex
+      ? 'codex'
+      : 'claude-code'
+
   const endpoint =
     process.env.VOIGHT_ENDPOINT ||
     process.env.NEXT_PUBLIC_VOIGHT_API ||
@@ -924,7 +940,10 @@ export async function runHook(): Promise<void> {
       }
     }
   } else {
-    // Claude Code legacy path — unchanged from pre-0.4.3.
+    // Claude Code or Codex — both use PascalCase events + cwd-based
+    // identity. The `frameworkPrefix` discriminator above picks the
+    // label so codex agents land under cursor:* — uhh, codex:* —
+    // instead of being mixed in with claude-code:* rows.
     markerPath = evt.cwd ? join(evt.cwd, '.voight-agent-id') : null
     let markerCuid: string | null = null
     if (markerPath && existsSync(markerPath)) {
@@ -938,9 +957,11 @@ export async function runHook(): Promise<void> {
     agentId =
       process.env.VOIGHT_AGENT_ID ||
       markerCuid ||
-      (evt.cwd ? `claude-code:${pathBasename(evt.cwd)}` : null) ||
-      (evt.session_id ? `claude-code:${evt.session_id.slice(0, 8)}` : null) ||
-      'claude-code:unknown'
+      (evt.cwd ? `${frameworkPrefix}:${pathBasename(evt.cwd)}` : null) ||
+      (evt.session_id
+        ? `${frameworkPrefix}:${evt.session_id.slice(0, 8)}`
+        : null) ||
+      `${frameworkPrefix}:unknown`
   }
 
   const voight = new Voight({
@@ -948,7 +969,7 @@ export async function runHook(): Promise<void> {
     apiKey,
     endpoint,
     swallowErrors: true,
-    defaults: { tool: isCursor ? 'cursor' : 'claude-code' },
+    defaults: { tool: frameworkPrefix },
   })
 
   const mapped = isCursor
