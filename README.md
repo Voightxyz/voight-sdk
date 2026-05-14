@@ -16,15 +16,17 @@ Live timeline, privacy-first capture, anomaly alerts, and tamper-evident logs an
 
 ---
 
-## Wire it into Claude Code in one paste
+## Wire it into your coding agent in one paste
 
 ```bash
 npx -y @voightxyz/sdk setup
 ```
 
-The wizard asks you to pick a privacy level (Minimal · Standard ★ · Full) and your API key, wires the hooks into `~/.claude/settings.json`, and you're done. Every prompt, tool call, bash, and file edit Claude Code does streams to your dashboard. **No code changes.**
+The wizard auto-detects whether you're calling from Claude Code, Cursor, or Codex (via env signals like `CLAUDECODE`, `CURSOR_TRACE_ID`, etc.) and writes the right hook config in the right place. Pick a privacy level (Minimal · Standard ★ · Full), paste your API key, and every prompt, tool call, bash, and file edit your agent does streams to your dashboard. **No code changes.**
 
 Generate your API key at [voight.xyz/dashboard](https://voight.xyz/dashboard).
+
+Run from a generic terminal? Pass `--target=claude|cursor|codex` to skip detection.
 
 ---
 
@@ -133,11 +135,15 @@ if (!decision.allow) return // blocked by policy
 
 The `setup` command writes hooks into different settings paths based on `--target`:
 
-| Target | Path | State |
+| Target | Path written | State |
 | --- | --- | --- |
-| `claude` (default) | `~/.claude/settings.json` | ✅ Verified — production install path |
-| `cursor` | `~/.cursor/settings.json` | 🟡 Scaffolded, validation in flight |
-| `codex` | `~/.codex/settings.json` | 🟡 Scaffolded, validation in flight |
+| `claude` | `~/.claude/settings.json` (env + hooks block) | ✅ Verified |
+| `cursor` | `~/.cursor/hooks.json` + `~/.cursor/hooks/voight.sh` wrapper | ✅ Verified (0.5.0) |
+| `codex` | `~/.codex/settings.json` | 🟡 Scaffolded, validation pending |
+
+Defaults to auto-detect — set explicitly with `--target=<name>` when the env signals are ambiguous (CI, generic terminals).
+
+Cursor's hooks schema has no env block, so the setup writes a small wrapper script (`~/.cursor/hooks/voight.sh`) that exports `VOIGHT_KEY` and `VOIGHT_PRIVACY` before invoking the hook handler. Other targets keep the env directly in their settings file.
 
 Targets for Gemini, Replit Agent, and other coding-agent surfaces are on the roadmap.
 
@@ -163,8 +169,9 @@ Same event stream, same dashboard, same alerts.
 ```
 src/
 ├── cli.ts          npx -y @voightxyz/sdk <cmd> entry
-├── setup.ts        Setup wizard — privacy level prompt + API key + hooks
-├── hook.ts         Hook handler — reads stdin JSON, maps to LogInput
+├── setup.ts        Setup wizard — target auto-detect, privacy prompt, API key, hooks writer
+├── hook.ts         Hook handler — reads stdin JSON, dispatches per agent
+├── cursor.ts       Cursor adapter — translates Cursor's 11 hook events to LogInput
 ├── transcript.ts   Reads Claude Code transcripts for token attribution
 ├── privacy.ts      PII scrubbing + per-event privacy filter
 ├── git.ts          Git context capture (branch / sha / remote)
@@ -173,7 +180,7 @@ src/
 └── index.ts        Public `Voight` class
 ```
 
-The hook subprocess is short-lived (one per Claude Code lifecycle event) and never throws — failures are swallowed so they can't crash the host editor.
+The hook subprocess is short-lived (one per agent lifecycle event) and never throws — failures are swallowed so they can't crash the host editor.
 
 ---
 
@@ -189,7 +196,8 @@ The hook subprocess is short-lived (one per Claude Code lifecycle event) and nev
 | Git context capture | ✅ Shipped |
 | Wakeup/system-prompt classification | ✅ Shipped |
 | Permission-denial classification | ✅ Shipped (architectural caveats — see code comments) |
-| Cursor / Codex install targets | 🟡 Scaffolded, validation in flight |
+| Cursor install target (11 hook events, auto-detect) | ✅ Shipped (0.5.0) |
+| Codex install target | 🟡 Scaffolded, validation pending |
 | `voight.check()` / `voight.enforce()` (HITL) | 🟡 No-op today, v1.0 |
 | Solana hash anchoring of events | 🟡 v1.0 |
 | Framework Skills (`@voightxyz/eliza-skill`, etc.) | 🔴 Roadmap, separate packages |
@@ -200,7 +208,7 @@ The hook subprocess is short-lived (one per Claude Code lifecycle event) and nev
 
 ```bash
 npm install
-npm test         # Vitest — currently 138 tests
+npm test         # Vitest — currently 194 tests
 npm run type-check
 npm run build    # tsup — produces ESM + CJS + .d.ts in dist/
 ```
