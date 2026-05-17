@@ -1,6 +1,6 @@
 {
   "name": "@voightxyz/sdk",
-  "version": "0.6.4-beta.1",
+  "version": "0.6.4",
   "description": "Real-time observability for AI agents on Solana. A 3-line SDK, a live timeline, and an on-chain audit trail.",
   "keywords": [
     "solana",
@@ -56,7 +56,6 @@
     "node": ">=18"
   },
   "publishConfig": {
-    "access": "public",
-    "tag": "beta"
+    "access": "public"
   }
 }
