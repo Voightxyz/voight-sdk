@@ -13,17 +13,21 @@
 
 import { runSetup } from './setup.js'
 import { runHook } from './hook.js'
+import { runInit } from './init.js'
 
 const HELP = `
 voight — observability for AI agents on Solana
 
 Usage:
   npx -y @voightxyz/sdk setup           Wire Voight into your coding agent
+  npx -y @voightxyz/sdk init            Scaffold Voight into a production app (OpenAI / Anthropic)
   npx -y @voightxyz/sdk hook            Hook handler (invoked by the agent)
 
 Options:
   --key <vk_...>                        Pass your Voight API key non-interactively
-  --target claude|cursor|codex          Editor to wire up (auto-detected by default)
+  --target claude|cursor|codex          Editor to wire up (setup only; auto-detected by default)
+  --privacy minimal|standard|full       Capture level (defaults to standard)
+  --agent <name>                        Agent name for the dashboard (init only)
   --help, -h                            Show this message
 
 Need a key? Generate one at https://voight.xyz/dashboard
@@ -40,6 +44,11 @@ async function main() {
 
   if (cmd === 'setup') {
     await runSetup(argv.slice(1))
+    return
+  }
+
+  if (cmd === 'init') {
+    await runInit(argv.slice(1))
     return
   }
 
