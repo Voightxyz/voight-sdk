@@ -2,9 +2,9 @@
 
 # @voightxyz/sdk
 
-**Real-time observability + on-chain trust for AI agents.**
+**Real-time observability for AI coding agents and production LLM apps.**
 
-Live timeline, privacy-first capture, anomaly alerts, and tamper-evident logs anchored on Solana — for any AI agent, including the one inside your editor.
+Hooks for Claude Code and Cursor (zero code changes), library mode for custom Node bots, and a `init` wizard that scaffolds the companion wrapper SDKs ([`@voightxyz/openai`](https://www.npmjs.com/package/@voightxyz/openai), [`@voightxyz/anthropic`](https://www.npmjs.com/package/@voightxyz/anthropic)) into production apps in 30 seconds. One backend, one dashboard, one SDK family.
 
 [![npm](https://img.shields.io/npm/v/@voightxyz/sdk.svg)](https://www.npmjs.com/package/@voightxyz/sdk)
 [![license](https://img.shields.io/npm/l/@voightxyz/sdk.svg)](./LICENSE)
@@ -32,7 +32,7 @@ Run from a generic terminal? Pass `--target=claude|cursor|codex` to skip detecti
 
 ## Or import the library directly
 
-For agents you build yourself (autonomous bots, ElizaOS / Solana Agent Kit, custom runtimes):
+For agents you build yourself (autonomous Node bots, custom runtimes, anything that talks JSON to an HTTP API):
 
 ```bash
 npm install @voightxyz/sdk
@@ -56,6 +56,28 @@ await voight.log({
 ```
 
 Every event shows up live on your dashboard. Anomaly detection and (on-chain anchoring, coming v1.0) are automatic.
+
+---
+
+## Or scaffold Voight into a production LLM app
+
+For apps that already call OpenAI or Anthropic in production, a separate sub-command scaffolds the wrapper SDKs without any copy-paste:
+
+```bash
+cd your-app
+npx -y @voightxyz/sdk init
+```
+
+The wizard detects `openai` and/or `@anthropic-ai/sdk` in your `package.json`, prompts for a privacy level + Voight key + agent name, validates the key against the API, and writes a ready-to-import `src/lib/voight.ts` with the wrapped clients. Tailors the usage snippet to your framework (Next.js or vanilla) and prints the right install command for your package manager (pnpm / yarn / bun / npm). Full walkthrough at [docs.voight.xyz/ai-apps/wizard](https://docs.voight.xyz/ai-apps/wizard).
+
+The wrappers themselves live in separate packages so apps that need only one can install only one:
+
+- [`@voightxyz/openai`](https://www.npmjs.com/package/@voightxyz/openai) — wraps the OpenAI Node SDK (Chat Completions + Responses API)
+- [`@voightxyz/anthropic`](https://www.npmjs.com/package/@voightxyz/anthropic) — wraps the Anthropic Node SDK (Messages API, cache breakpoints)
+
+Both share `withTrace` / `log` / per-user `tags` for request-boundary tracing and per-customer cost attribution. See [docs.voight.xyz/concepts/per-user-spend](https://docs.voight.xyz/concepts/per-user-spend) for the customer-attribution pattern.
+
+`init` writes only inside your project directory — it never touches `~/.claude`, `~/.cursor`, or `~/.codex`. Distinct from `setup`, which wires IDE-level hooks for the coding-agent flow above.
 
 ---
 
@@ -139,7 +161,7 @@ The `setup` command writes hooks into different settings paths based on `--targe
 | --- | --- | --- |
 | `claude` | `~/.claude/settings.json` (env + hooks block) | ✅ Verified |
 | `cursor` | `~/.cursor/hooks.json` + `~/.cursor/hooks/voight.sh` wrapper | ✅ Verified (0.5.0) |
-| `codex` | `~/.codex/plugins/voight-marketplace/` (local marketplace + plugin) + `~/.codex/config.toml` registration | ✅ Verified (0.6.0) |
+| `codex` | `~/.codex/plugins/voight-marketplace/` (local marketplace + plugin) + `~/.codex/config.toml` registration | 🟡 In active fix (Codex sandbox blocks hooks from reaching the SDK) |
 
 Defaults to auto-detect — set explicitly with `--target=<name>` when the env signals are ambiguous (CI, generic terminals).
 
@@ -190,17 +212,18 @@ The hook subprocess is short-lived (one per agent lifecycle event) and never thr
 | --- | --- |
 | Library mode (`voight.log()`) | ✅ Shipped |
 | Claude Code hook integration | ✅ Shipped, verified install path |
+| Cursor install target (11 hook events, auto-detect) | ✅ Shipped (0.5.0) |
 | Transcript-based token capture | ✅ Shipped |
 | 3-level privacy capture + PII scrubbing | ✅ Shipped (0.4.x) |
-| Setup wizard (TTY + non-TTY 3-step flow) | ✅ Shipped (0.4.1+) |
+| `setup` wizard for coding agents (TTY + non-TTY) | ✅ Shipped (0.4.1+) |
+| `init` wizard for production LLM apps (OpenAI + Anthropic detection, framework-aware) | ✅ Shipped (0.6.4) |
+| Companion App SDK wrappers ([`@voightxyz/openai`](https://www.npmjs.com/package/@voightxyz/openai), [`@voightxyz/anthropic`](https://www.npmjs.com/package/@voightxyz/anthropic)) | ✅ Shipped (separate packages) |
 | Git context capture | ✅ Shipped |
 | Wakeup/system-prompt classification | ✅ Shipped |
 | Permission-denial classification | ✅ Shipped (architectural caveats — see code comments) |
-| Cursor install target (11 hook events, auto-detect) | ✅ Shipped (0.5.0) |
-| Codex install target (local marketplace plugin, 7 hook events, auto-detect) | ✅ Shipped (0.6.0) |
+| Codex install target | 🟡 In active fix (sandbox connectivity work) |
 | `voight.check()` / `voight.enforce()` (HITL) | 🟡 No-op today, v1.0 |
 | Solana hash anchoring of events | 🟡 v1.0 |
-| Framework Skills (`@voightxyz/eliza-skill`, etc.) | 🔴 Roadmap, separate packages |
 
 ---
 
@@ -208,7 +231,7 @@ The hook subprocess is short-lived (one per agent lifecycle event) and never thr
 
 ```bash
 npm install
-npm test         # Vitest — currently 211 tests
+npm test         # Vitest
 npm run type-check
 npm run build    # tsup — produces ESM + CJS + .d.ts in dist/
 ```
