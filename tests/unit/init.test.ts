@@ -20,11 +20,14 @@ import {
   detectAppProviders,
   detectPackageManager,
   packageManagerInstallCommand,
+  packageManagerInstallCommandVercel,
   detectFramework,
   readDefaultAgentName,
   generateAppVoightModule,
   writeEnvLocal,
   resolveVoightModulePath,
+  resolveInstrumentationPath,
+  generateInstrumentationModule,
 } from '../../src/init.js'
 
 let cwd: string
@@ -84,6 +87,7 @@ describe('detectAppProviders', () => {
     expect(detectAppProviders(cwd)).toEqual({
       openai: '^4.79.2',
       anthropic: null,
+      vercel: null,
     })
   })
 
@@ -92,6 +96,7 @@ describe('detectAppProviders', () => {
     expect(detectAppProviders(cwd)).toEqual({
       openai: null,
       anthropic: '^0.96.0',
+      vercel: null,
     })
   })
 
@@ -102,6 +107,7 @@ describe('detectAppProviders', () => {
     expect(detectAppProviders(cwd)).toEqual({
       openai: '^4.79.2',
       anthropic: '^0.96.0',
+      vercel: null,
     })
   })
 
@@ -110,18 +116,57 @@ describe('detectAppProviders', () => {
     expect(detectAppProviders(cwd).openai).toBe('^4.79.2')
   })
 
+  it('detects the `ai` package (Vercel AI SDK) in dependencies', () => {
+    writePkg({ dependencies: { ai: '^6.0.0' } })
+    expect(detectAppProviders(cwd)).toEqual({
+      openai: null,
+      anthropic: null,
+      vercel: '^6.0.0',
+    })
+  })
+
+  it('detects all three (Vercel AI SDK app with peer-dep providers)', () => {
+    // Real-world shape: vercel/ai-chatbot has `ai` + `@ai-sdk/openai`
+    // which transitively brings `openai` as a peer. The wizard later
+    // prefers the Vercel path because `ai` is present.
+    writePkg({
+      dependencies: {
+        ai: '^6.0.0',
+        openai: '^4.79.2',
+        '@anthropic-ai/sdk': '^0.96.0',
+      },
+    })
+    expect(detectAppProviders(cwd)).toEqual({
+      openai: '^4.79.2',
+      anthropic: '^0.96.0',
+      vercel: '^6.0.0',
+    })
+  })
+
   it('returns nulls when no provider is present', () => {
     writePkg({ dependencies: { express: '^4.0.0' } })
-    expect(detectAppProviders(cwd)).toEqual({ openai: null, anthropic: null })
+    expect(detectAppProviders(cwd)).toEqual({
+      openai: null,
+      anthropic: null,
+      vercel: null,
+    })
   })
 
   it('returns nulls when package.json is missing', () => {
-    expect(detectAppProviders(cwd)).toEqual({ openai: null, anthropic: null })
+    expect(detectAppProviders(cwd)).toEqual({
+      openai: null,
+      anthropic: null,
+      vercel: null,
+    })
   })
 
   it('returns nulls when package.json is malformed', () => {
     writeFileSync(join(cwd, 'package.json'), '{ not valid json')
-    expect(detectAppProviders(cwd)).toEqual({ openai: null, anthropic: null })
+    expect(detectAppProviders(cwd)).toEqual({
+      openai: null,
+      anthropic: null,
+      vercel: null,
+    })
   })
 })
 
@@ -175,6 +220,37 @@ describe('packageManagerInstallCommand', () => {
   it('returns npm install command for npm', () => {
     expect(packageManagerInstallCommand('npm')).toBe(
       'npm install @voightxyz/openai @voightxyz/anthropic',
+    )
+  })
+})
+
+describe('packageManagerInstallCommandVercel', () => {
+  // Mirror of the openai/anthropic install command, but for the
+  // Vercel AI SDK path: ships `@voightxyz/vercel-ai` + `@vercel/otel`.
+  // The `ai` package and provider package (e.g. `@ai-sdk/openai`)
+  // are already installed when we detect a Vercel project, so we
+  // don't list them.
+  it('returns pnpm command for pnpm', () => {
+    expect(packageManagerInstallCommandVercel('pnpm')).toBe(
+      'pnpm add @voightxyz/vercel-ai @vercel/otel',
+    )
+  })
+
+  it('returns yarn command for yarn', () => {
+    expect(packageManagerInstallCommandVercel('yarn')).toBe(
+      'yarn add @voightxyz/vercel-ai @vercel/otel',
+    )
+  })
+
+  it('returns bun command for bun', () => {
+    expect(packageManagerInstallCommandVercel('bun')).toBe(
+      'bun add @voightxyz/vercel-ai @vercel/otel',
+    )
+  })
+
+  it('returns npm install command for npm', () => {
+    expect(packageManagerInstallCommandVercel('npm')).toBe(
+      'npm install @voightxyz/vercel-ai @vercel/otel',
     )
   })
 })
@@ -280,6 +356,61 @@ describe('generateAppVoightModule', () => {
     ).toThrow()
   })
 
+  // ─── Regression: vercel field is inert for the wrapper path ──────
+  //
+  // The 0.6.5 wizard added `vercel: string | null` to
+  // DetectedProviders. The wrapper-path generator (this function)
+  // must keep emitting the same module byte-for-byte regardless of
+  // that field — anything else would mean a behaviour change for
+  // every 0.6.4 user that already installed via the wizard.
+  //
+  // We compare `generateAppVoightModule` output across two shapes:
+  // the new full shape (with `vercel: null` present) and the
+  // historical shape (without `vercel`). They must be identical
+  // strings — equal content, equal newlines, equal whitespace.
+
+  it('emits identical output whether the new `vercel: null` field is present or not (openai + anthropic)', () => {
+    const withVercelField = generateAppVoightModule({
+      providers: { openai: '^4.0.0', anthropic: '^0.96.0', vercel: null },
+      agentName: 'my-app',
+      privacy: 'standard',
+    })
+    const historicalShape = generateAppVoightModule({
+      providers: { openai: '^4.0.0', anthropic: '^0.96.0' } as never,
+      agentName: 'my-app',
+      privacy: 'standard',
+    })
+    expect(withVercelField).toBe(historicalShape)
+  })
+
+  it('emits identical output for the openai-only path with vercel: null vs historical shape', () => {
+    const withVercelField = generateAppVoightModule({
+      providers: { openai: '^4.0.0', anthropic: null, vercel: null },
+      agentName: 'solo-openai',
+      privacy: 'minimal',
+    })
+    const historicalShape = generateAppVoightModule({
+      providers: { openai: '^4.0.0', anthropic: null } as never,
+      agentName: 'solo-openai',
+      privacy: 'minimal',
+    })
+    expect(withVercelField).toBe(historicalShape)
+  })
+
+  it('emits identical output for the anthropic-only path with vercel: null vs historical shape', () => {
+    const withVercelField = generateAppVoightModule({
+      providers: { openai: null, anthropic: '^0.96.0', vercel: null },
+      agentName: 'solo-anthropic',
+      privacy: 'full',
+    })
+    const historicalShape = generateAppVoightModule({
+      providers: { openai: null, anthropic: '^0.96.0' } as never,
+      agentName: 'solo-anthropic',
+      privacy: 'full',
+    })
+    expect(withVercelField).toBe(historicalShape)
+  })
+
   it('header comment explains how to swap keys from a secrets manager', () => {
     const out = generateAppVoightModule({
       providers: { openai: '^4.0.0', anthropic: null },
@@ -340,6 +471,138 @@ describe('resolveVoightModulePath', () => {
     const result = resolveVoightModulePath(cwd)
     expect(result.display).toBe('lib/voight.ts')
     expect(result.fullPath).toBe(join(cwd, 'lib/voight.ts'))
+  })
+})
+
+describe('resolveInstrumentationPath', () => {
+  // Mirrors resolveVoightModulePath: Next.js's `instrumentation.ts`
+  // entry point looks in two places — the project root and
+  // `src/instrumentation.ts` when `src/` exists. We respect whichever
+  // convention the project already uses.
+
+  it('uses src/instrumentation.ts when src/ exists', () => {
+    mkdirSync(join(cwd, 'src'))
+    const result = resolveInstrumentationPath(cwd)
+    expect(result.display).toBe('src/instrumentation.ts')
+    expect(result.fullPath).toBe(join(cwd, 'src/instrumentation.ts'))
+  })
+
+  it('uses instrumentation.ts at the root when src/ does not exist', () => {
+    const result = resolveInstrumentationPath(cwd)
+    expect(result.display).toBe('instrumentation.ts')
+    expect(result.fullPath).toBe(join(cwd, 'instrumentation.ts'))
+  })
+})
+
+describe('generateInstrumentationModule', () => {
+  // Exact-line assertions rather than a full snapshot — keeps the
+  // tests readable and lets a future contributor see at a glance
+  // exactly which lines are part of the contract vs incidental
+  // comment text that can change freely.
+
+  it('emits the registerOTel + VoightExporter wiring', () => {
+    const src = generateInstrumentationModule({
+      agentName: 'production-chat-api',
+      privacy: 'standard',
+    })
+    expect(src).toContain(
+      `import { registerOTel } from '@vercel/otel'`,
+    )
+    expect(src).toContain(
+      `import { VoightExporter } from '@voightxyz/vercel-ai'`,
+    )
+    expect(src).toContain(`serviceName: 'production-chat-api'`)
+    expect(src).toContain(`agent: 'production-chat-api'`)
+    expect(src).toContain(`privacy: 'standard'`)
+    expect(src).toContain('export function register()')
+  })
+
+  it('threads the privacy level through verbatim', () => {
+    const minimal = generateInstrumentationModule({
+      agentName: 'a',
+      privacy: 'minimal',
+    })
+    expect(minimal).toContain(`privacy: 'minimal'`)
+    const full = generateInstrumentationModule({
+      agentName: 'a',
+      privacy: 'full',
+    })
+    expect(full).toContain(`privacy: 'full'`)
+  })
+
+  it('includes the per-user attribution guidance in the header comment', () => {
+    // The header is what teaches devs how to light up the Users
+    // sub-tab without reading the docs. If a refactor drops it,
+    // this test fails so we notice before shipping.
+    const src = generateInstrumentationModule({
+      agentName: 'a',
+      privacy: 'standard',
+    })
+    expect(src).toContain('experimental_telemetry')
+    expect(src).toContain('metadata: { userId')
+    expect(src).toContain('ai.telemetry.metadata.*')
+  })
+
+  it('produces a valid TypeScript module (no obvious syntax artifacts)', () => {
+    const src = generateInstrumentationModule({
+      agentName: 'app',
+      privacy: 'standard',
+    })
+    // Defensive: nothing should leak Markdown formatting or
+    // template-literal artefacts. The output must be drop-in TS.
+    expect(src).not.toContain('```')
+    expect(src).not.toContain('${')
+    // Balanced braces in the registerOTel block.
+    const open = (src.match(/{/g) ?? []).length
+    const close = (src.match(/}/g) ?? []).length
+    expect(open).toBe(close)
+  })
+
+  it('produces a byte-identical snapshot for a standard call', () => {
+    // Exact-string match — the single strictest possible regression
+    // guard. If any whitespace, comment line, or import order
+    // changes, this test fails and forces a deliberate update.
+    // Use a fixed agentName + privacy so the snapshot is stable.
+    const src = generateInstrumentationModule({
+      agentName: 'production-chat-api',
+      privacy: 'standard',
+    })
+    const expected = [
+      '// ──────────────────────────────────────────────────────────────────',
+      '// Voight observability — generated by `npx @voightxyz/sdk init`',
+      '//',
+      '// Registers the Voight OpenTelemetry exporter for every Vercel',
+      '// AI SDK call (streamText / generateText / streamObject /',
+      '// generateObject). To opt a call into observability, flip',
+      "// `experimental_telemetry: { isEnabled: true }` on it.",
+      '//',
+      '// For per-user attribution, pass a metadata bag:',
+      '//',
+      '//   experimental_telemetry: {',
+      '//     isEnabled: true,',
+      "//     metadata: { userId: session.user.id, plan: session.user.plan },",
+      '//   }',
+      '//',
+      "// The Voight exporter lifts `ai.telemetry.metadata.*` attributes",
+      '// onto `metadata.tags.*` so the dashboard Users sub-tab + per-tag',
+      '// filter pills populate automatically.',
+      '// ──────────────────────────────────────────────────────────────────',
+      '',
+      `import { registerOTel } from '@vercel/otel'`,
+      `import { VoightExporter } from '@voightxyz/vercel-ai'`,
+      '',
+      'export function register() {',
+      '  registerOTel({',
+      `    serviceName: 'production-chat-api',`,
+      '    traceExporter: new VoightExporter({',
+      `      agent: 'production-chat-api',`,
+      `      privacy: 'standard',`,
+      '    }),',
+      '  })',
+      '}',
+      '',
+    ].join('\n')
+    expect(src).toBe(expected)
   })
 })
 
