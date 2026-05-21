@@ -4,7 +4,7 @@
 
 **Real-time observability for AI coding agents and production LLM apps.**
 
-Hooks for Claude Code and Cursor (zero code changes), library mode for custom Node bots, and a `init` wizard that scaffolds the companion wrapper SDKs ([`@voightxyz/openai`](https://www.npmjs.com/package/@voightxyz/openai), [`@voightxyz/anthropic`](https://www.npmjs.com/package/@voightxyz/anthropic)) into production apps in 30 seconds. One backend, one dashboard, one SDK family.
+Hooks for Claude Code and Cursor (zero code changes), library mode for custom Node bots, and a `init` wizard that scaffolds the companion App SDKs — [`@voightxyz/openai`](https://www.npmjs.com/package/@voightxyz/openai), [`@voightxyz/anthropic`](https://www.npmjs.com/package/@voightxyz/anthropic), or [`@voightxyz/vercel-ai`](https://www.npmjs.com/package/@voightxyz/vercel-ai) — into production apps in 30 seconds. One backend, one dashboard, one SDK family.
 
 [![npm](https://img.shields.io/npm/v/@voightxyz/sdk.svg)](https://www.npmjs.com/package/@voightxyz/sdk)
 [![license](https://img.shields.io/npm/l/@voightxyz/sdk.svg)](./LICENSE)
@@ -68,7 +68,7 @@ cd your-app
 npx -y @voightxyz/sdk init
 ```
 
-The wizard detects `openai` and/or `@anthropic-ai/sdk` in your `package.json`, prompts for a privacy level + Voight key + agent name, validates the key against the API, and writes a ready-to-import `src/lib/voight.ts` with the wrapped clients. Tailors the usage snippet to your framework (Next.js or vanilla) and prints the right install command for your package manager (pnpm / yarn / bun / npm). Full walkthrough at [docs.voight.xyz/ai-apps/wizard](https://docs.voight.xyz/ai-apps/wizard).
+The wizard detects whichever SDK your project already uses — `openai`, `@anthropic-ai/sdk`, or `ai` (Vercel AI SDK) — in your `package.json`. For direct wrappers it writes a ready-to-import `src/lib/voight.ts` with the wrapped clients; for Vercel AI SDK projects it writes a root `instrumentation.ts` that registers [`@voightxyz/vercel-ai`](https://www.npmjs.com/package/@voightxyz/vercel-ai) with `@vercel/otel`. Same prompts either way (privacy level + Voight key + agent name), framework-aware usage snippet, and pm-tailored install command (pnpm / yarn / bun / npm). Full walkthrough at [docs.voight.xyz/ai-apps/wizard](https://docs.voight.xyz/ai-apps/wizard).
 
 The wrappers themselves live in separate packages so apps that need only one can install only one:
 
@@ -216,8 +216,8 @@ The hook subprocess is short-lived (one per agent lifecycle event) and never thr
 | Transcript-based token capture | ✅ Shipped |
 | 3-level privacy capture + PII scrubbing | ✅ Shipped (0.4.x) |
 | `setup` wizard for coding agents (TTY + non-TTY) | ✅ Shipped (0.4.1+) |
-| `init` wizard for production LLM apps (OpenAI + Anthropic detection, framework-aware) | ✅ Shipped (0.6.4) |
-| Companion App SDK wrappers ([`@voightxyz/openai`](https://www.npmjs.com/package/@voightxyz/openai), [`@voightxyz/anthropic`](https://www.npmjs.com/package/@voightxyz/anthropic)) | ✅ Shipped (separate packages) |
+| `init` wizard for production LLM apps (OpenAI + Anthropic + Vercel AI SDK detection, framework-aware) | ✅ Shipped (0.6.5) |
+| Companion App SDK wrappers ([`@voightxyz/openai`](https://www.npmjs.com/package/@voightxyz/openai), [`@voightxyz/anthropic`](https://www.npmjs.com/package/@voightxyz/anthropic), [`@voightxyz/vercel-ai`](https://www.npmjs.com/package/@voightxyz/vercel-ai)) | ✅ Shipped (separate packages) |
 | Git context capture | ✅ Shipped |
 | Wakeup/system-prompt classification | ✅ Shipped |
 | Permission-denial classification | ✅ Shipped (architectural caveats — see code comments) |
