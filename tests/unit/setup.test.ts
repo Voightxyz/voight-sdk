@@ -11,20 +11,17 @@
 import { describe, it, expect } from 'vitest'
 
 import {
-  appendCodexConfigRegistration,
+  buildCodexOtelConfig,
   detectTarget,
   ensureCursorHook,
   frameworkName,
-  generateCodexHookScript,
-  generateCodexHooksJson,
-  generateCodexMarketplaceManifest,
-  generateCodexPluginJson,
-  generateCodexPluginManifest,
+  generateCodexOtelBlock,
   generateCursorHookScript,
   parseArgs,
-  parseCodexScriptEnv,
   parseCursorScriptEnv,
   parsePrivacyChoice,
+  readCodexOtelState,
+  stripVoightCodexSections,
 } from '../../src/setup.js'
 
 describe('parseArgs', () => {
@@ -312,179 +309,131 @@ describe('frameworkName', () => {
   })
 })
 
-describe('generateCodexMarketplaceManifest', () => {
-  it('declares one local plugin under the voight marketplace', () => {
-    const out = JSON.parse(generateCodexMarketplaceManifest())
-    expect(out.name).toBe('voight')
-    expect(out.interface.displayName).toBe('Voight')
-    expect(out.plugins).toHaveLength(1)
-    expect(out.plugins[0]).toMatchObject({
-      name: 'voight',
-      source: { source: 'local', path: './plugins/voight' },
-    })
+describe('generateCodexOtelBlock', () => {
+  it('renders the managed [otel] block with the key and endpoint', () => {
+    const out = generateCodexOtelBlock('vk_test123', 'standard')
+    expect(out).toContain('[otel]')
+    expect(out).toContain('log_user_prompt = true')
+    expect(out).toContain('[otel.exporter.otlp-http]')
+    expect(out).toContain('endpoint = "https://api.voight.xyz/v1/otel/logs"')
+    expect(out).toContain('protocol = "json"')
+    expect(out).toContain('headers = { Authorization = "Bearer vk_test123" }')
   })
 
-  it('uses authentication=ON_INSTALL (Codex rejects NONE)', () => {
-    // Pre-0.6.3 we wrote 'NONE' here and Codex's plugin loader
-    // rejected the whole marketplace with "unknown variant `NONE`,
-    // expected `ON_INSTALL` or `ON_USE`". Regression guard.
-    const out = JSON.parse(generateCodexMarketplaceManifest())
-    expect(out.plugins[0].policy.authentication).toBe('ON_INSTALL')
+  it('maps minimal privacy to log_user_prompt = false', () => {
+    expect(generateCodexOtelBlock('vk_x', 'minimal')).toContain('log_user_prompt = false')
+    expect(generateCodexOtelBlock('vk_x', 'full')).toContain('log_user_prompt = true')
   })
 })
 
-describe('generateCodexPluginJson', () => {
-  it('emits a Codex-formatted plugin manifest with required fields', () => {
-    // Mirrors the structure used by /Users/<...>/cache/openai-bundled/
-    // browser/0.1.0-alpha2/.codex-plugin/plugin.json. Without this
-    // manifest Codex fails to install the plugin even after the
-    // marketplace is registered.
-    const out = JSON.parse(generateCodexPluginJson('0.6.3'))
-    expect(out.name).toBe('voight')
-    expect(out.version).toBe('0.6.3')
-    expect(out.interface.displayName).toBe('Voight')
-    expect(out.interface.category).toBe('Engineering')
-  })
-})
-
-describe('generateCodexPluginManifest', () => {
-  it('emits a lock-version-1 manifest pinning the plugin id', () => {
-    const out = JSON.parse(generateCodexPluginManifest('2026-05-14T20:00:00Z'))
-    expect(out.lockVersion).toBe(1)
-    expect(out.pluginId).toBe('xyz.voight.observability')
-    expect(out.generatedAt).toBe('2026-05-14T20:00:00Z')
-  })
-})
-
-describe('generateCodexHooksJson', () => {
-  it('wires all 7 PascalCase events to the wrapper script', () => {
-    const out = JSON.parse(generateCodexHooksJson())
-    const expected = [
-      'PreToolUse',
-      'PostToolUse',
-      'UserPromptSubmit',
-      'Stop',
-      'SubagentStop',
-      'PreCompact',
-      'PostCompact',
-    ]
-    expect(Object.keys(out.hooks).sort()).toEqual(expected.sort())
-    for (const ev of expected) {
-      const entries = out.hooks[ev]
-      expect(entries[0].hooks[0].command).toBe('./scripts/voight-hook.sh')
-      expect(entries[0].hooks[0].type).toBe('command')
-    }
-  })
-
-  it('adds matchers for tool-firing events only', () => {
-    const out = JSON.parse(generateCodexHooksJson())
-    // Pre/PostToolUse take '*' so we see every tool.
-    expect(out.hooks.PreToolUse[0].matcher).toBe('*')
-    expect(out.hooks.PostToolUse[0].matcher).toBe('*')
-    // Lifecycle events don't take a matcher.
-    expect(out.hooks.Stop[0].matcher).toBeUndefined()
-    expect(out.hooks.UserPromptSubmit[0].matcher).toBeUndefined()
-  })
-})
-
-describe('generateCodexHookScript', () => {
-  it('falls back to npx by default (when local install was not provided)', () => {
-    const out = generateCodexHookScript('vk_xyz', 'standard')
-    expect(out).toContain('export VOIGHT_KEY="vk_xyz"')
-    expect(out).toContain('export VOIGHT_PRIVACY="standard"')
-    expect(out).toContain('export VOIGHT_SOURCE="codex"')
-    expect(out).toContain('exec npx -y @voightxyz/sdk hook')
-  })
-
-  it('resolves the SDK relative to the script when local install is available', () => {
-    // The path is computed from $BASH_SOURCE so the plugin folder
-    // is portable across machines — no /Users/<name>/ hardcoded.
-    const out = generateCodexHookScript('vk_xyz', 'standard', true)
-    expect(out).toContain('SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")"')
-    expect(out).toContain(
-      'exec node "$SCRIPT_DIR/../node_modules/@voightxyz/sdk/dist/cli.js" hook',
-    )
-    // Does NOT fall back to npx — sandbox-blocking path must not be
-    // present when local install succeeded.
-    expect(out).not.toContain('npx -y @voightxyz/sdk hook')
-  })
-})
-
-describe('parseCodexScriptEnv', () => {
-  it('round-trips with generateCodexHookScript', () => {
-    const parsed = parseCodexScriptEnv(
-      generateCodexHookScript('vk_round_trip', 'minimal'),
-    )
-    expect(parsed).toEqual({ key: 'vk_round_trip', privacy: 'minimal' })
-  })
-
-  it('returns undefined fields when the script has none', () => {
-    expect(parseCodexScriptEnv('echo hi')).toEqual({
-      key: undefined,
-      privacy: undefined,
-    })
-  })
-})
-
-describe('appendCodexConfigRegistration', () => {
-  const SOURCE_PATH = '/Users/test/.codex/plugins/voight-marketplace'
-
-  it('appends marketplace + plugin sections to a fresh config', () => {
-    const { content, changed } = appendCodexConfigRegistration(
+describe('stripVoightCodexSections', () => {
+  it('removes the dead plugin-era marketplace + plugin registration', () => {
+    const config = [
+      'model = "gpt-5.5"',
       '',
-      SOURCE_PATH,
-      '2026-05-14T20:00:00Z',
-    )
-    expect(changed).toBe(true)
-    expect(content).toContain('[marketplaces.voight]')
-    expect(content).toContain('source_type = "local"')
-    expect(content).toContain(`source = "${SOURCE_PATH}"`)
-    expect(content).toContain('[plugins."voight@voight"]')
-    expect(content).toContain('enabled = true')
+      '[marketplaces.voight]',
+      'source_type = "local"',
+      'source = "/Users/x/.codex/plugins/voight-marketplace"',
+      '',
+      '[plugins."voight@voight"]',
+      'enabled = true',
+      '',
+      '[features]',
+      'js_repl = false',
+    ].join('\n')
+    const { content, foreignOtel } = stripVoightCodexSections(config)
+    expect(content).not.toContain('marketplaces.voight')
+    expect(content).not.toContain('voight@voight')
+    expect(content).toContain('model = "gpt-5.5"')
+    expect(content).toContain('[features]')
+    expect(foreignOtel).toBe(false)
   })
 
-  it('preserves existing config when appending', () => {
-    const existing = 'model = "gpt-5.5"\nmodel_reasoning_effort = "medium"\n'
-    const { content, changed } = appendCodexConfigRegistration(
-      existing,
-      SOURCE_PATH,
-    )
-    expect(changed).toBe(true)
-    expect(content.startsWith(existing)).toBe(true)
-    expect(content).toContain('[marketplaces.voight]')
+  it('removes a previously managed otel block (marker-delimited)', () => {
+    const config =
+      'model = "x"\n\n' + generateCodexOtelBlock('vk_old', 'standard')
+    const { content } = stripVoightCodexSections(config)
+    expect(content).not.toContain('vk_old')
+    expect(content).not.toContain('[otel]')
+    expect(content).toContain('model = "x"')
   })
 
-  it('is idempotent when both sections already exist', () => {
-    const existing = `model = "gpt-5.5"
+  it('removes an unmarked otel section that points at Voight', () => {
+    const config = [
+      'model = "x"',
+      '',
+      '[otel]',
+      'log_user_prompt = true',
+      '',
+      '[otel.exporter.otlp-http]',
+      'endpoint = "https://api.voight.xyz/v1/otel/logs"',
+      'headers = { Authorization = "Bearer vk_manual" }',
+    ].join('\n')
+    const { content, foreignOtel } = stripVoightCodexSections(config)
+    expect(content).not.toContain('vk_manual')
+    expect(foreignOtel).toBe(false)
+  })
 
-[marketplaces.voight]
-last_updated = "2026-05-14T19:00:00Z"
-source_type = "local"
-source = "${SOURCE_PATH}"
+  it('flags a foreign otel exporter and leaves it in place', () => {
+    const config = [
+      '[otel]',
+      'log_user_prompt = false',
+      '',
+      '[otel.exporter.otlp-grpc]',
+      'endpoint = "https://ingest.us.signoz.cloud:443"',
+    ].join('\n')
+    const { content, foreignOtel } = stripVoightCodexSections(config)
+    expect(foreignOtel).toBe(true)
+    expect(content).toContain('signoz')
+  })
+})
 
-[plugins."voight@voight"]
-enabled = true
-`
-    const { content, changed } = appendCodexConfigRegistration(
-      existing,
-      SOURCE_PATH,
+describe('buildCodexOtelConfig', () => {
+  it('appends the managed block to a fresh config', () => {
+    const { content, changed, foreignOtel } = buildCodexOtelConfig(
+      'model = "gpt-5.5"\n',
+      'vk_new',
+      'standard',
     )
+    expect(changed).toBe(true)
+    expect(foreignOtel).toBe(false)
+    expect(content).toContain('model = "gpt-5.5"')
+    expect(content).toContain('Bearer vk_new')
+  })
+
+  it('is idempotent: re-running with a new key replaces the old block', () => {
+    const first = buildCodexOtelConfig('model = "x"\n', 'vk_one', 'standard')
+    const second = buildCodexOtelConfig(first.content, 'vk_two', 'minimal')
+    expect(second.content).not.toContain('vk_one')
+    expect(second.content).toContain('Bearer vk_two')
+    expect(second.content).toContain('log_user_prompt = false')
+    expect(second.content.match(/\[otel\]/g)).toHaveLength(1)
+  })
+
+  it('refuses to clobber a foreign otel exporter', () => {
+    const config = '[otel.exporter.otlp-grpc]\nendpoint = "https://other.example"\n'
+    const { content, changed, foreignOtel } = buildCodexOtelConfig(config, 'vk_x', 'standard')
     expect(changed).toBe(false)
-    expect(content).toBe(existing)
+    expect(foreignOtel).toBe(true)
+    expect(content).toBe(config)
+  })
+})
+
+describe('readCodexOtelState', () => {
+  it('recovers key + privacy from a managed block', () => {
+    const content = generateCodexOtelBlock('vk_abc', 'standard')
+    expect(readCodexOtelState(content)).toEqual({ key: 'vk_abc', privacy: 'standard' })
   })
 
-  it('appends only the missing section when one exists already', () => {
-    const existing = `[marketplaces.voight]
-source_type = "local"
-source = "${SOURCE_PATH}"
-`
-    const { content, changed } = appendCodexConfigRegistration(
-      existing,
-      SOURCE_PATH,
-    )
-    expect(changed).toBe(true)
-    expect(content).toContain('[plugins."voight@voight"]')
-    // Marketplace section should not be duplicated.
-    expect(content.match(/\[marketplaces\.voight\]/g)).toHaveLength(1)
+  it('maps log_user_prompt = false back to minimal', () => {
+    const content = generateCodexOtelBlock('vk_abc', 'minimal')
+    expect(readCodexOtelState(content)).toEqual({ key: 'vk_abc', privacy: 'minimal' })
+  })
+
+  it('returns {} when the config has no Voight otel block', () => {
+    expect(readCodexOtelState('model = "x"\n')).toEqual({})
+    expect(
+      readCodexOtelState('[otel.exporter.otlp-grpc]\nendpoint = "https://other"\n'),
+    ).toEqual({})
   })
 })

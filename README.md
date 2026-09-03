@@ -22,7 +22,7 @@ Hooks for Claude Code and Cursor (zero code changes), library mode for custom No
 npx -y @voightxyz/sdk setup
 ```
 
-The wizard auto-detects whether you're calling from Claude Code, Cursor, or Codex (via env signals: `CLAUDECODE` / `CURSOR_TRACE_ID` / `CODEX_THREAD_ID`) and writes the right hook config in the right place. Pick a privacy level (Minimal · Standard ★ · Full), paste your API key, and every prompt, tool call, bash, and file edit your agent does streams to your dashboard. **No code changes.**
+The wizard auto-detects whether you're calling from Claude Code, Cursor, or Codex (via env signals: `CLAUDECODE` / `CURSOR_TRACE_ID` / `CODEX_THREAD_ID`) and writes the right config in the right place (hooks for Claude Code and Cursor, native OpenTelemetry export for Codex). Pick a privacy level (Minimal · Standard ★ · Full), paste your API key, and every prompt, tool call, bash, and file edit your agent does streams to your dashboard. **No code changes.**
 
 Generate your API key at [voight.xyz/dashboard](https://voight.xyz/dashboard).
 
@@ -161,11 +161,11 @@ The `setup` command writes hooks into different settings paths based on `--targe
 | --- | --- | --- |
 | `claude` | `~/.claude/settings.json` (env + hooks block) | ✅ Verified |
 | `cursor` | `~/.cursor/hooks.json` + `~/.cursor/hooks/voight.sh` wrapper | ✅ Verified (0.5.0) |
-| `codex` | `~/.codex/plugins/voight-marketplace/` (local marketplace + plugin) + `~/.codex/config.toml` registration | 🟡 In active fix (Codex sandbox blocks hooks from reaching the SDK) |
+| `codex` | `~/.codex/config.toml` (`[otel]` block pointing Codex's native OpenTelemetry export at Voight) | ✅ Verified (codex-cli 0.146) |
 
 Defaults to auto-detect — set explicitly with `--target=<name>` when the env signals are ambiguous (CI, generic terminals).
 
-Cursor's hooks schema has no env block, so the setup writes a small wrapper script (`~/.cursor/hooks/voight.sh`) that exports `VOIGHT_KEY` and `VOIGHT_PRIVACY` before invoking the hook handler. Codex uses a similar wrapper inside a local marketplace plugin (no external repo required — registered via `source_type = "local"` in config.toml). Other targets keep the env directly in their settings file.
+Cursor's hooks schema has no env block, so the setup writes a small wrapper script (`~/.cursor/hooks/voight.sh`) that exports `VOIGHT_KEY` and `VOIGHT_PRIVACY` before invoking the hook handler. Codex needs no hooks at all: it ships native OpenTelemetry export, and the wizard points it at Voight's OTLP receiver (`[otel]` in `~/.codex/config.toml`, JSON encoding, your API key in the Authorization header) — each Codex session lands as one trace. Other targets keep the env directly in their settings file.
 
 Targets for Gemini, Replit Agent, and other coding-agent surfaces are on the roadmap.
 
@@ -221,7 +221,7 @@ The hook subprocess is short-lived (one per agent lifecycle event) and never thr
 | Git context capture | ✅ Shipped |
 | Wakeup/system-prompt classification | ✅ Shipped |
 | Permission-denial classification | ✅ Shipped (architectural caveats — see code comments) |
-| Codex install target | 🟡 In active fix (sandbox connectivity work) |
+| Codex install target | ✅ Verified (native OTel export → Voight OTLP receiver, codex-cli 0.146) |
 | `voight.check()` / `voight.enforce()` (HITL) | 🟡 No-op today, v1.0 |
 | Solana hash anchoring of events | 🟡 v1.0 |
 

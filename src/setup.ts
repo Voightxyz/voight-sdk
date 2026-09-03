@@ -116,19 +116,9 @@ function targetSettingsPath(target: Target): string {
       // a different schema; see writeCursorHooks() below.
       return join(homedir(), '.cursor', 'hooks.json')
     case 'codex':
-      // Codex uses a marketplace plugin model. The wizard header
-      // displays the marketplace manifest path; the actual files
-      // written are scattered across the marketplace tree (see
-      // writeCodexPlugin below).
-      return join(
-        homedir(),
-        '.codex',
-        'plugins',
-        'voight-marketplace',
-        '.agents',
-        'plugins',
-        'marketplace.json',
-      )
+      // Codex ships native OpenTelemetry export; the wizard writes an
+      // [otel] block into its config (see the Codex adapter below).
+      return join(homedir(), '.codex', 'config.toml')
   }
 }
 
@@ -350,499 +340,207 @@ function writeCursorHooks(
 
 // ─── Codex adapter ───────────────────────────────────────────────
 //
-// Codex (OpenAI's desktop coding agent, model gpt-5.5 as of
-// 2026-05) exposes hooks the same way Claude Code does
-// (PascalCase: PreToolUse / PostToolUse / UserPromptSubmit / Stop
-// / SubagentStop / PreCompact / PostCompact). The SDK's existing
-// hook.ts dispatcher processes those events already — no new
-// mapper needed.
+// Codex (OpenAI's coding agent — CLI, TUI and Desktop, verified on
+// codex-cli 0.146) ships native OpenTelemetry export, opt-in via
+// `[otel]` in ~/.codex/config.toml. The wizard points that exporter
+// at Voight's OTLP/JSON logs receiver with the user's API key in the
+// Authorization header. Every session's prompts, tool calls, model
+// calls and token usage then stream in, and the conversation id
+// groups each session into one Voight trace.
 //
-// The difference is *where* hooks are registered. Codex requires
-// a plugin under a marketplace; user-level hooks.json is not
-// supported. Local marketplaces with `source_type = "local"` ARE
-// supported (verified in the bundled openai-bundled marketplace),
-// so the setup wizard writes the entire marketplace + plugin
-// scaffold under ~/.codex/plugins/voight-marketplace/ and edits
-// ~/.codex/config.toml to enable it. No external repo needed.
-//
-// Spec source: /Applications/Codex.app binary strings + figma
-// plugin reference at ~/.codex/.tmp/plugins/plugins/figma/.
-
-const CODEX_HOOK_EVENTS = [
-  'PreToolUse',
-  'PostToolUse',
-  'UserPromptSubmit',
-  'Stop',
-  'SubagentStop',
-  'PreCompact',
-  'PostCompact',
-] as const
-
-const CODEX_PLUGIN_NAME = 'voight'
-const CODEX_MARKETPLACE_NAME = 'voight'
-const CODEX_PLUGIN_ID = 'xyz.voight.observability'
+// The pre-0.7 approach (a marketplace plugin firing hooks inside
+// Codex Desktop) is dead — the sandbox blocks the hooks' outbound
+// traffic — so setup now also cleans up anything that attempt left
+// in config.toml.
 
 function codexHome(): string {
   return process.env.CODEX_HOME ?? join(homedir(), '.codex')
-}
-
-function codexMarketplaceRoot(): string {
-  return join(codexHome(), 'plugins', `${CODEX_MARKETPLACE_NAME}-marketplace`)
-}
-
-function codexPluginRoot(): string {
-  return join(codexMarketplaceRoot(), 'plugins', CODEX_PLUGIN_NAME)
-}
-
-function codexMarketplaceManifestPath(): string {
-  return join(codexMarketplaceRoot(), '.agents', 'plugins', 'marketplace.json')
-}
-
-function codexPluginManifestPath(): string {
-  return join(codexPluginRoot(), 'plugin.lock.json')
-}
-
-function codexPluginHooksPath(): string {
-  return join(codexPluginRoot(), 'hooks.json')
-}
-
-function codexPluginScriptPath(): string {
-  return join(codexPluginRoot(), 'scripts', 'voight-hook.sh')
 }
 
 function codexConfigPath(): string {
   return join(codexHome(), 'config.toml')
 }
 
-/**
- * Render the marketplace manifest. Declares one plugin (Voight)
- * with a local source. Codex's plugin engine reads this when the
- * marketplace is registered via [marketplaces.voight] in
- * config.toml.
- */
-export function generateCodexMarketplaceManifest(): string {
-  const body = {
-    name: CODEX_MARKETPLACE_NAME,
-    interface: {
-      displayName: 'Voight',
-    },
-    plugins: [
-      {
-        name: CODEX_PLUGIN_NAME,
-        source: {
-          source: 'local',
-          path: `./plugins/${CODEX_PLUGIN_NAME}`,
-        },
-        policy: {
-          installation: 'AVAILABLE',
-          // Codex's plugin loader only accepts ON_INSTALL or ON_USE
-          // here. 0.6.2 used 'NONE' which caused Codex to reject the
-          // entire marketplace ("unknown variant `NONE`") so the
-          // plugin never loaded.
-          authentication: 'ON_INSTALL',
-        },
-        category: 'Engineering',
-      },
-    ],
-  }
-  return JSON.stringify(body, null, 2) + '\n'
+const CODEX_OTEL_BEGIN =
+  '# ── voight otel (managed by `npx @voightxyz/sdk setup`) ──'
+const CODEX_OTEL_END = '# ── end voight otel ──'
+const CODEX_OTEL_ENDPOINT = 'https://api.voight.xyz/v1/otel/logs'
+
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 /**
- * Codex's per-plugin manifest, distinct from our internal
- * plugin.lock.json. Lives at <plugin>/.codex-plugin/plugin.json
- * and is what Codex's plugin loader actually reads. Format
- * extracted from /Users/locotoo/.codex/plugins/cache/openai-bundled/
- * browser/0.1.0-alpha2/.codex-plugin/plugin.json.
+ * Render the managed `[otel]` block. `log_user_prompt` follows the
+ * privacy level: minimal never exports prompt text (Codex sends the
+ * literal "[REDACTED]" instead, which the receiver drops).
  */
-export function generateCodexPluginJson(version: string = '0.6.3'): string {
-  const body = {
-    name: CODEX_PLUGIN_NAME,
-    version,
-    description:
-      'Voight observability — captures every prompt, tool call, and decision Codex makes and streams them to voight.xyz/dashboard.',
-    author: {
-      name: 'Voight',
-    },
-    homepage: 'https://voight.xyz',
-    repository: 'https://github.com/Voightxyz/voight-sdk',
-    license: 'Apache-2.0',
-    keywords: ['observability', 'telemetry', 'agents'],
-    interface: {
-      displayName: 'Voight',
-      shortDescription: 'Real-time observability for Codex agents',
-      longDescription:
-        "Captures Codex's PreToolUse / PostToolUse / UserPromptSubmit / Stop / SubagentStop / PreCompact / PostCompact hook events and ships them to voight.xyz/dashboard for live timeline, anomaly detection, and cost attribution.",
-      developerName: 'Voight',
-      category: 'Engineering',
-      capabilities: ['Read'],
-    },
-  }
-  return JSON.stringify(body, null, 2) + '\n'
-}
-
-/**
- * Render the plugin lock manifest. Minimal — just identification
- * + a timestamp so Codex can fingerprint the install.
- */
-export function generateCodexPluginManifest(
-  generatedAt: string = new Date().toISOString(),
-): string {
-  const body = {
-    lockVersion: 1,
-    pluginId: CODEX_PLUGIN_ID,
-    pluginVersion: '0.6.0',
-    generatedBy: '@voightxyz/sdk setup',
-    generatedAt,
-  }
-  return JSON.stringify(body, null, 2) + '\n'
-}
-
-/**
- * Render the hooks.json that wires our wrapper script to each of
- * the events the hook handler can map. Same PascalCase shape Claude
- * Code uses — `hook.ts` processes these without changes.
- *
- * Matchers: tool-firing events (`Pre/PostToolUse`) take a `*` so we
- * see every tool; lifecycle events don't need a matcher.
- */
-export function generateCodexHooksJson(): string {
-  const command = `./scripts/voight-hook.sh`
-  const hooks: Record<string, unknown[]> = {}
-  for (const event of CODEX_HOOK_EVENTS) {
-    const entry: Record<string, unknown> = {
-      hooks: [{ type: 'command', command }],
-    }
-    if (event === 'PreToolUse' || event === 'PostToolUse') {
-      entry.matcher = '*'
-    }
-    hooks[event] = [entry]
-  }
-  return JSON.stringify({ hooks }, null, 2) + '\n'
-}
-
-/**
- * Render the wrapper script that Codex invokes for each hook.
- * Mirrors the Cursor wrapper: env vars set here (Codex's hook
- * runtime inherits, but having an explicit export keeps the
- * subprocess self-contained against future runtime changes).
- */
-export function generateCodexHookScript(
+export function generateCodexOtelBlock(
   key: string,
   privacy: PrivacyLevel,
-  /**
-   * When `true`, the wrapper invokes a locally-installed SDK
-   * resolved relative to the script itself (no network at hook
-   * fire time). Required for Codex Desktop which runs hooks in a
-   * sandbox that blocks npm registry access.
-   *
-   * When `false`, falls back to `npx -y @voightxyz/sdk hook` —
-   * works in unsandboxed environments and preserves the pre-0.6.2
-   * behaviour as a graceful degrade path when the local install
-   * step couldn't run during setup.
-   */
-  useLocalInstall: boolean = false,
 ): string {
-  const execLine = useLocalInstall
-    ? // Resolve the SDK install relative to the script itself so the
-      // wrapper stays portable across machines, even if the user moves
-      // their Codex home folder.
-      `SCRIPT_DIR="$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
-exec node "$SCRIPT_DIR/../node_modules/@voightxyz/sdk/dist/cli.js" hook`
-    : `exec npx -y @voightxyz/sdk hook`
-
-  return `#!/usr/bin/env bash
-# Voight observability hook wrapper for Codex.
-#
-# Codex's plugin hooks invoke this script for each registered
-# event. We export the SDK's env vars here and exec into the
-# hook handler, which translates Codex's PascalCase events into
-# Voight's LogInput shape.
-#
-# VOIGHT_SOURCE tells the hook handler which framework invoked it
-# — Codex events use the same PascalCase as Claude Code, so the
-# handler can't distinguish them from the payload alone.
-#
-# 0.6.2+ resolves the SDK from a local install in the plugin's
-# own node_modules to avoid network at hook fire time (Codex's
-# default sandbox blocks the npm registry). The local path is
-# resolved relative to this script so the wrapper is portable.
-#
-# Regenerated by 'npx -y @voightxyz/sdk setup'; hand-edits will
-# be overwritten on the next run.
-
-export VOIGHT_KEY="${key}"
-export VOIGHT_PRIVACY="${privacy}"
-export VOIGHT_SOURCE="codex"
-${execLine}
-`
+  return [
+    CODEX_OTEL_BEGIN,
+    '[otel]',
+    `log_user_prompt = ${privacy !== 'minimal'}`,
+    '',
+    '[otel.exporter.otlp-http]',
+    `endpoint = "${CODEX_OTEL_ENDPOINT}"`,
+    'protocol = "json"',
+    `headers = { Authorization = "Bearer ${key}" }`,
+    CODEX_OTEL_END,
+    '',
+  ].join('\n')
 }
 
 /**
- * Pure: parse our env vars back out of an existing wrapper script
- * so re-runs can show the current values. Mirrors Cursor's
- * parseCursorScriptEnv for symmetry across adapters.
+ * Split a TOML document into a preamble (root-level keys before the
+ * first table) and `[header]`-delimited segments, so whole tables can
+ * be dropped without a TOML parser dependency.
  */
-export function parseCodexScriptEnv(content: string): {
+function splitTomlSegments(content: string): {
+  preamble: string
+  segments: { header: string; text: string }[]
+} {
+  const lines = content.split('\n')
+  const segments: { header: string; text: string }[] = []
+  let preamble: string[] = []
+  let current: { header: string; lines: string[] } | null = null
+  for (const line of lines) {
+    const m = line.match(/^\s*(\[[^\]]+\])/)
+    if (m) {
+      if (current) {
+        segments.push({ header: current.header, text: current.lines.join('\n') })
+      }
+      current = { header: m[1]!, lines: [line] }
+    } else if (current) {
+      current.lines.push(line)
+    } else {
+      preamble.push(line)
+    }
+  }
+  if (current) {
+    segments.push({ header: current.header, text: current.lines.join('\n') })
+  }
+  return { preamble: preamble.join('\n'), segments }
+}
+
+/**
+ * Remove everything the SDK ever wrote to config.toml — the managed
+ * otel block, an unmarked voight-pointing `[otel]` section (written
+ * by hand or an older build), and the dead marketplace/plugin
+ * registration — and report whether a FOREIGN `[otel]` config (one
+ * pointing somewhere that isn't Voight) is present. Pure.
+ */
+export function stripVoightCodexSections(content: string): {
+  content: string
+  foreignOtel: boolean
+} {
+  // 1. Marker-delimited managed block.
+  let out = content.replace(
+    new RegExp(
+      `${escapeRe(CODEX_OTEL_BEGIN)}[\\s\\S]*?${escapeRe(CODEX_OTEL_END)}\\n?`,
+      'g',
+    ),
+    '',
+  )
+
+  // 2. Whole-table removal for the dead plugin registration and any
+  //    remaining voight-pointing otel tables.
+  const { preamble, segments } = splitTomlSegments(out)
+  const otel = segments.filter((s) => /^\[otel(\.|\])/.test(s.header))
+  const otelIsOurs =
+    otel.length > 0 &&
+    otel.some((s) => s.text.includes('api.voight.xyz') || s.text.includes('voight.xyz/v1/otel'))
+  const foreignOtel = otel.length > 0 && !otelIsOurs
+
+  const kept = segments.filter((s) => {
+    if (s.header === '[marketplaces.voight]') return false
+    if (s.header === '[plugins."voight@voight"]') return false
+    if (otelIsOurs && /^\[otel(\.|\])/.test(s.header)) return false
+    return true
+  })
+
+  out = [preamble, ...kept.map((s) => s.text)].join('\n')
+  out = out.replace(/\n{3,}/g, '\n\n')
+  return { content: out, foreignOtel }
+}
+
+/**
+ * Full config rewrite, pure: strip our old sections, then append a
+ * fresh managed block — unless the user runs their own (non-Voight)
+ * `[otel]` exporter, in which case the config is left alone (Codex
+ * supports one exporter per signal; clobbering theirs is worse than
+ * asking them to choose).
+ */
+export function buildCodexOtelConfig(
+  existing: string,
+  key: string,
+  privacy: PrivacyLevel,
+): { content: string; changed: boolean; foreignOtel: boolean } {
+  const stripped = stripVoightCodexSections(existing)
+  if (stripped.foreignOtel) {
+    return { content: existing, changed: false, foreignOtel: true }
+  }
+  let base = stripped.content
+  if (base.trim().length === 0) base = ''
+  else base = base.replace(/\n*$/, '\n\n')
+  return {
+    content: base + generateCodexOtelBlock(key, privacy),
+    changed: true,
+    foreignOtel: false,
+  }
+}
+
+/**
+ * Read the key + privacy from a previously written managed block, so
+ * re-runs don't force a re-paste of the secret. Pure counterpart of
+ * `readExistingCodexState`.
+ */
+export function readCodexOtelState(content: string): {
   key?: string
   privacy?: PrivacyLevel
 } {
-  const keyMatch = content.match(/VOIGHT_KEY="([^"]+)"/)
-  const privMatch = content.match(/VOIGHT_PRIVACY="(\w+)"/)
-  const key = keyMatch ? keyMatch[1] : undefined
-  const privRaw = privMatch ? privMatch[1] : undefined
-  const privacy =
-    privRaw && isPrivacyLevel(privRaw) ? (privRaw as PrivacyLevel) : undefined
-  return { key, privacy }
+  if (!content.includes(CODEX_OTEL_ENDPOINT)) return {}
+  const keyMatch = content.match(/Authorization = "Bearer ([^"]+)"/)
+  const promptMatch = content.match(/log_user_prompt = (true|false)/)
+  return {
+    key: keyMatch?.[1],
+    privacy: promptMatch ? (promptMatch[1] === 'true' ? 'standard' : 'minimal') : undefined,
+  }
 }
 
 function readExistingCodexState(): { key?: string; privacy?: PrivacyLevel } {
-  const scriptPath = codexPluginScriptPath()
-  if (!existsSync(scriptPath)) return {}
+  const path = codexConfigPath()
+  if (!existsSync(path)) return {}
   try {
-    return parseCodexScriptEnv(readFileSync(scriptPath, 'utf-8'))
+    return readCodexOtelState(readFileSync(path, 'utf-8'))
   } catch {
     return {}
   }
 }
 
 /**
- * Append our marketplace + plugin registration to ~/.codex/config.toml,
- * idempotently. We *only* append — existing entries are detected
- * by section header presence and skipped to preserve user edits
- * and avoid TOML parse complications.
- *
- * Backup written to config.toml.voight-backup before any change
- * so the user can revert if Codex complains.
- *
- * Returns true if config was modified, false if no changes were
- * needed (already registered).
+ * Apply the config rewrite to ~/.codex/config.toml. A one-time backup
+ * of the pristine pre-Voight file is kept at config.toml.voight-backup
+ * (never overwritten by re-runs).
  */
-export function appendCodexConfigRegistration(
-  existing: string,
-  marketplaceSourceAbsPath: string,
-  nowIso: string = new Date().toISOString(),
-): { content: string; changed: boolean } {
-  const hasMarketplace = /\[marketplaces\.voight\][\s\S]/.test(existing)
-  const hasPlugin = /\[plugins\."voight@voight"\][\s\S]/.test(existing)
-
-  if (hasMarketplace && hasPlugin) {
-    return { content: existing, changed: false }
-  }
-
-  const lines: string[] = []
-  // Ensure the file ends with a newline before our additions.
-  let content = existing
-  if (content.length > 0 && !content.endsWith('\n')) content += '\n'
-  // Blank line separator unless the file is empty.
-  if (content.trim().length > 0) lines.push('')
-
-  if (!hasMarketplace) {
-    lines.push('[marketplaces.voight]')
-    lines.push(`last_updated = "${nowIso}"`)
-    lines.push('source_type = "local"')
-    lines.push(`source = "${marketplaceSourceAbsPath}"`)
-    lines.push('')
-  }
-
-  if (!hasPlugin) {
-    lines.push('[plugins."voight@voight"]')
-    lines.push('enabled = true')
-    lines.push('')
-  }
-
-  return { content: content + lines.join('\n'), changed: true }
-}
-
-/**
- * Write the Codex plugin scaffold + edit config.toml. Idempotent:
- * re-running regenerates files in place and skips already-present
- * config sections.
- */
-/**
- * Pre-install the SDK into the plugin's own node_modules. Codex
- * Desktop runs hook subprocesses inside a sandbox that blocks the
- * npm registry by default — `npx -y @voightxyz/sdk hook` would
- * stall trying to resolve the package. Having a local copy makes
- * the wrapper self-contained.
- *
- * Returns true on success, false if install failed (caller falls
- * back to the npx-based wrapper).
- */
-function tryInstallSdkForCodex(pluginRoot: string): boolean {
-  try {
-    execSync(
-      `npm install --prefix "${pluginRoot}" --no-save --no-audit --no-fund --silent @voightxyz/sdk@latest`,
-      { stdio: 'pipe', timeout: 60_000 },
-    )
-    // Sanity check the expected output exists before claiming success.
-    const cliPath = join(
-      pluginRoot,
-      'node_modules',
-      '@voightxyz',
-      'sdk',
-      'dist',
-      'cli.js',
-    )
-    return existsSync(cliPath)
-  } catch {
-    return false
-  }
-}
-
-/**
- * Find the `codex` CLI binary. Codex Desktop bundles it inside the
- * .app on macOS; some installs also expose it on PATH. Returns the
- * absolute path if found, undefined otherwise (callers degrade
- * gracefully — setup still completes, user gets a warning).
- */
-function findCodexCli(): string | undefined {
-  const candidates = [
-    '/Applications/Codex.app/Contents/Resources/codex',
-    '/usr/local/bin/codex',
-    join(homedir(), '.local', 'bin', 'codex'),
-  ]
-  for (const path of candidates) {
-    if (existsSync(path)) return path
-  }
-  // Try PATH lookup as last resort.
-  try {
-    const result = execSync('command -v codex', {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      encoding: 'utf-8',
-    })
-    const path = result.trim()
-    if (path && existsSync(path)) return path
-  } catch {
-    /* not on PATH */
-  }
-  return undefined
-}
-
-/**
- * Path where Codex's plugin loader expects the installed plugin
- * (NOT the marketplace source — that's a separate location).
- */
-function codexPluginCachePath(): string {
-  return join(
-    codexHome(),
-    'plugins',
-    'cache',
-    CODEX_MARKETPLACE_NAME,
-    CODEX_PLUGIN_NAME,
-  )
-}
-
-/**
- * Run `codex plugin marketplace add` so Codex validates the
- * marketplace and copies the plugin into its cache. Returns true
- * if the cache directory was populated, false otherwise.
- */
-function installCodexPlugin(marketplaceRoot: string): boolean {
-  const codex = findCodexCli()
-  if (!codex) return false
-  try {
-    execSync(`"${codex}" plugin marketplace add "${marketplaceRoot}"`, {
-      stdio: 'pipe',
-      timeout: 30_000,
-    })
-  } catch {
-    // CLI failed — could be schema error, already-registered, etc.
-    // Don't fail setup; just check whether the cache got populated
-    // (sometimes Codex auto-installs on next launch).
-  }
-  return existsSync(codexPluginCachePath())
-}
-
-function writeCodexPlugin(
+function writeCodexOtel(
   key: string,
   privacy: PrivacyLevel,
-): {
-  pluginRoot: string
-  configChanged: boolean
-  localInstallOk: boolean
-  cacheInstalled: boolean
-} {
-  const root = codexMarketplaceRoot()
-  const pluginRoot = codexPluginRoot()
-  const scriptPath = codexPluginScriptPath()
-
-  // 1. Marketplace manifest (fixed enum vs 0.6.2 — Codex only
-  // accepts ON_INSTALL / ON_USE for authentication).
-  const mpPath = codexMarketplaceManifestPath()
-  mkdirSync(dirname(mpPath), { recursive: true })
-  writeFileSync(mpPath, generateCodexMarketplaceManifest(), 'utf-8')
-
-  // 2. Plugin manifests — TWO files now:
-  //   - plugin.lock.json: internal versioning marker
-  //   - .codex-plugin/plugin.json: the manifest Codex's plugin
-  //     loader actually reads. Without this, Codex fails to
-  //     install the plugin even after marketplace registration.
-  const pluginPath = codexPluginManifestPath()
-  mkdirSync(dirname(pluginPath), { recursive: true })
-  writeFileSync(pluginPath, generateCodexPluginManifest(), 'utf-8')
-
-  const codexPluginJsonPath = join(pluginRoot, '.codex-plugin', 'plugin.json')
-  mkdirSync(dirname(codexPluginJsonPath), { recursive: true })
-  writeFileSync(codexPluginJsonPath, generateCodexPluginJson(), 'utf-8')
-
-  // 3. hooks.json
-  writeFileSync(codexPluginHooksPath(), generateCodexHooksJson(), 'utf-8')
-
-  // 4. Pre-install SDK locally (network OK here, setup runs with
-  // user-approved network). If this fails — corp proxy, offline
-  // setup, weird npm config — fall back to a wrapper that still
-  // uses npx so the install completes; the user will see a warning
-  // and hooks won't fire in sandboxed Codex sessions, same state
-  // as pre-0.6.2.
-  mkdirSync(pluginRoot, { recursive: true })
-  const localInstallOk = tryInstallSdkForCodex(pluginRoot)
-
-  // 5. wrapper script + chmod +x. Path resolution is relative to
-  // the script itself, so the plugin folder can be moved without
-  // breaking the hook.
-  mkdirSync(dirname(scriptPath), { recursive: true })
-  writeFileSync(
-    scriptPath,
-    generateCodexHookScript(key, privacy, localInstallOk),
-    'utf-8',
-  )
-  try {
-    chmodSync(scriptPath, 0o755)
-  } catch {
-    /* non-POSIX filesystem — Codex is Mac/Linux today, harmless */
-  }
-
-  // 6. config.toml — append marketplace + plugin registration
-  const configPath = codexConfigPath()
-  const existing = existsSync(configPath)
-    ? readFileSync(configPath, 'utf-8')
-    : ''
-  const { content, changed } = appendCodexConfigRegistration(existing, root)
-  if (changed) {
-    // Backup before writing so the user can revert if Codex
-    // complains about the new sections.
-    if (existing.length > 0) {
-      writeFileSync(`${configPath}.voight-backup`, existing, 'utf-8')
+): { configPath: string; changed: boolean; foreignOtel: boolean } {
+  const path = codexConfigPath()
+  const existing = existsSync(path) ? readFileSync(path, 'utf-8') : ''
+  const result = buildCodexOtelConfig(existing, key, privacy)
+  if (result.changed) {
+    const backupPath = `${path}.voight-backup`
+    if (existing.length > 0 && !existsSync(backupPath)) {
+      writeFileSync(backupPath, existing, 'utf-8')
     }
-    mkdirSync(dirname(configPath), { recursive: true })
-    writeFileSync(configPath, content, 'utf-8')
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileSync(path, result.content, 'utf-8')
   }
-
-  // 7. Trigger Codex's plugin installer so the marketplace plugin
-  // gets copied to ~/.codex/plugins/cache/voight/voight/<version>/.
-  // Codex's hook loader reads from THAT cache path, not from the
-  // marketplace source. Without this step the plugin sits in the
-  // marketplace, registered but never installed, and hooks never
-  // fire.
-  const cacheInstalled = installCodexPlugin(root)
-
-  return {
-    pluginRoot,
-    configChanged: changed,
-    localInstallOk,
-    cacheInstalled,
-  }
+  return { configPath: path, changed: result.changed, foreignOtel: result.foreignOtel }
 }
 
 // ─── End Codex adapter ───────────────────────────────────────────
@@ -1062,11 +760,15 @@ function printDoneMessage(
   target: Target,
 ): void {
   const hookWord = addedHooks === 1 ? 'hook' : 'hooks'
+  const wiredLine =
+    target === 'codex'
+      ? 'OpenTelemetry export wired into Codex'
+      : `${addedHooks} ${hookWord} wired into ${frameworkName(target)}`
   console.log('')
   console.log("  🎉 You're all set!")
   console.log('')
   console.log(`    ✓ ${capitalize(privacy)} mode enabled`)
-  console.log(`    ✓ ${addedHooks} ${hookWord} wired into ${frameworkName(target)}`)
+  console.log(`    ✓ ${wiredLine}`)
   console.log('    ✓ API key configured')
   console.log('')
   console.log('    → See your agent live: https://voight.xyz/dashboard')
@@ -1206,43 +908,27 @@ export async function runSetup(argv: string[]): Promise<void> {
     const result = writeCursorHooks(key, privacy)
     added = result.added
   } else if (target === 'codex') {
-    // Codex: local marketplace + plugin scaffold + config.toml
-    // edit. Same 7 PascalCase events Claude Code uses, so hook.ts
-    // processes them unchanged.
-    const result = writeCodexPlugin(key, privacy)
-    added = CODEX_HOOK_EVENTS.length
-    if (!result.localInstallOk) {
+    // Codex: point its native OpenTelemetry export at Voight's OTLP
+    // receiver via ~/.codex/config.toml (cleaning up anything the
+    // dead plugin-era setup left behind).
+    const result = writeCodexOtel(key, privacy)
+    added = 1
+    if (result.foreignOtel) {
       console.log('')
-      console.log(
-        '  ⚠ Could not pre-install the SDK to the plugin folder.',
-      )
-      console.log(
-        '    The wrapper will fall back to `npx`, which Codex Desktop',
-      )
-      console.log(
-        "    may block inside its sandbox. Re-run setup once you've",
-      )
-      console.log('    restored npm registry access if hooks don\'t fire.')
+      console.log('  ⚠ Your config.toml already has an [otel] exporter pointing')
+      console.log('    somewhere else, and Codex supports one exporter per signal.')
+      console.log('    Nothing was changed. To use Voight instead, remove your')
+      console.log('    [otel] section and re-run this setup — or add the block')
+      console.log('    manually next to your own:')
+      console.log('')
+      console.log('      [otel.exporter.otlp-http]')
+      console.log('      endpoint = "https://api.voight.xyz/v1/otel/logs"')
+      console.log('      protocol = "json"')
+      console.log(`      headers = { Authorization = "Bearer ${key}" }`)
+      process.exit(1)
     }
-    if (!result.cacheInstalled) {
-      console.log('')
-      console.log('  ⚠ Codex did not install the plugin to its cache.')
-      console.log(
-        '    Codex looks for plugins under ~/.codex/plugins/cache/voight/',
-      )
-      console.log(
-        '    voight/ — the marketplace is registered but the plugin was',
-      )
-      console.log(
-        '    not copied there. Hooks WILL NOT fire until this is fixed.',
-      )
-      console.log('')
-      console.log('    Try manually:')
-      console.log(
-        '      codex plugin marketplace add ~/.codex/plugins/voight-marketplace',
-      )
-      console.log('    Then restart Codex.')
-    }
+    console.log('  ✓ OpenTelemetry export → Voight written to config.toml')
+    console.log('    Restart Codex (Desktop or CLI session) to apply.')
   } else {
     // Claude Code.
     if (!claudeSettings.env || typeof claudeSettings.env !== 'object') {
