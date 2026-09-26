@@ -55,7 +55,7 @@ await voight.log({
 })
 ```
 
-Every event shows up live on your dashboard. Anomaly detection and (on-chain anchoring, coming v1.0) are automatic.
+Every event shows up live on your dashboard. Anomaly detection is automatic.
 
 ---
 
@@ -223,7 +223,7 @@ The hook subprocess is short-lived (one per agent lifecycle event) and never thr
 | Permission-denial classification | ✅ Shipped (architectural caveats — see code comments) |
 | Codex install target | ✅ Verified (native OTel export → Voight OTLP receiver, codex-cli 0.146) |
 | `voight.check()` / `voight.enforce()` (HITL) | 🟡 No-op today, v1.0 |
-| Solana hash anchoring of events | 🟡 v1.0 |
+| External anchoring of the audit-trail hashes | 🟡 roadmap |
 
 ---
 
@@ -247,7 +247,7 @@ node dist/cli.js setup --privacy=2 --key=vk_test
 
 ## Companion repo
 
-Voight's hosted backend (Fastify API + Next.js dashboard + Solana indexers + Postgres) lives in **[`voightxyz/voight`](https://github.com/Voightxyz/voight)**. This SDK is the only piece that runs on your machine.
+Voight's hosted backend (Fastify API + Next.js dashboard + Postgres) lives in **[`voightxyz/voight`](https://github.com/Voightxyz/voight)**. This SDK is the only piece that runs on your machine.
 
 ---
 
@@ -256,3 +256,7 @@ Voight's hosted backend (Fastify API + Next.js dashboard + Solana indexers + Pos
 Apache 2.0 © [Voight](https://voight.xyz)
 
 See [`LICENSE`](./LICENSE) for full terms. Includes patent grant + trademark protection.
+
+---
+
+Voight is the observability and debugging infrastructure for autonomous systems, built by Galaxyhub Labs Inc. Company, team and traction: https://voight.xyz/company

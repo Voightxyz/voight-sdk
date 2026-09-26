@@ -1,7 +1,7 @@
 {
   "name": "@voightxyz/sdk",
   "version": "0.7.0",
-  "description": "Real-time observability for AI agents on Solana. A 3-line SDK, a live timeline, and an on-chain audit trail.",
+  "description": "Observability for AI coding agents and LLM apps: hooks for Claude Code and Cursor, Codex sessions, library mode, per-user cost attribution and plan tracking.",
   "keywords": [
     "solana",
     "ai-agents",
