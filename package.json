@@ -1,6 +1,6 @@
 {
   "name": "@voightxyz/sdk",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Observability for AI coding agents and LLM apps: hooks for Claude Code and Cursor, Codex sessions, library mode, per-user cost attribution and plan tracking.",
   "keywords": [
     "solana",
